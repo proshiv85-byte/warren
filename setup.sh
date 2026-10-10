@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # warren server setup wizard.
 #
-# On the VPS:        sudo bash setup.sh
+# On the VPS:        wget https://raw.githubusercontent.com/proshiv85-byte/warren/main/setup.sh
+#                    sudo bash setup.sh
+#                    (downloads warren from the latest GitHub release, unless a
+#                    warren-linux-* binary is next to this script)
+#
 # From your own PC:  ./setup.sh user@your-vps   (builds warren, copies it over,
 #                                                and runs this wizard there)
 #
@@ -22,6 +26,7 @@ UNIT=/etc/systemd/system/warren.service
 LE_HOOK=/etc/letsencrypt/renewal-hooks/deploy/warren.sh
 ACME_ROOT=/var/lib/warren-acme
 NGINX_MARK="# managed by warren setup.sh"
+REPO=proshiv85-byte/warren
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -42,6 +47,8 @@ header() { printf '\n%s── %s %s\n\n' "$B" "$*" "$R"; }
 
 # Report unexpected failures, but not from inside $(...), where the caller
 # handles the exit status.
+DOWNLOAD_DIR=
+trap '[[ -n $DOWNLOAD_DIR ]] && rm -rf "$DOWNLOAD_DIR"' EXIT
 trap 'if ((BASH_SUBSHELL == 0)); then die "unexpected failure on line $LINENO (command: $BASH_COMMAND)"; fi' ERR
 
 # Questions read from the terminal, so the script also works when piped.
@@ -196,8 +203,44 @@ remote_setup() {
 
 # ------------------------------------------------------- find a binary ---
 
+# fetch URL FILE: download with curl or wget, whichever is installed.
+fetch() {
+	if have curl; then
+		curl -fsSL --retry 2 -o "$2" "$1"
+	elif have wget; then
+		wget -q -O "$2" "$1"
+	else
+		return 1
+	fi
+}
+
+# Downloads warren-linux-ARCH from the latest GitHub release into NEW_BIN,
+# checking it against the release's SHA256SUMS.
+download_release() {
+	local goarch=$1 name="warren-linux-$1" dir
+	local base="https://github.com/$REPO/releases/latest/download"
+	have curl || have wget || { pkg_refresh; pkg_install curl; } ||
+		die "need curl or wget to download warren"
+	have sha256sum || die "sha256sum is missing (install coreutils)"
+
+	info "Downloading $name from the latest release"
+	dir=$(mktemp -d)
+	DOWNLOAD_DIR=$dir
+	fetch "$base/$name" "$dir/warren" && fetch "$base/SHA256SUMS" "$dir/SHA256SUMS" ||
+		die "download failed. Check this VPS can reach github.com, or put $name next to this script"
+	local want got
+	want=$(awk -v n="$name" '$2 == n || $2 == "*" n {print $1}' "$dir/SHA256SUMS")
+	got=$(sha256sum "$dir/warren" | awk '{print $1}')
+	[[ -n $want ]] || die "the latest release has no $name (this VPS's architecture isn't supported)"
+	[[ $want == "$got" ]] || die "checksum mismatch for $name: refusing to install it"
+	ok "Downloaded and verified $name"
+	NEW_BIN=$dir/warren
+}
+
+# find_binary [optional]: sets NEW_BIN to a warren binary to install. With
+# "optional", an already installed warren is fine and nothing is downloaded.
 find_binary() {
-	local arch goarch
+	local mode=${1-} arch goarch
 	arch=$(uname -m)
 	case $arch in
 		x86_64|amd64) goarch=amd64 ;;
@@ -226,21 +269,10 @@ find_binary() {
 	fi
 
 	if [[ -z ${NEW_BIN:-} ]]; then
-		if [[ -x $BIN_PATH ]]; then
-			NEW_BIN=
+		if [[ $mode == optional && -x $BIN_PATH ]]; then
 			return 0
 		fi
-		cat >&2 <<-EOF
-		${RED}error:${R} can't find the warren program.
-
-		  Put warren-linux-$goarch next to this script, or run from your own PC
-		  (in the warren source folder):
-
-		    ./setup.sh ${SUDO_USER:-user}@this-vps
-
-		  which builds warren, copies it here and runs this setup.
-		EOF
-		exit 1
+		download_release "$goarch"
 	fi
 
 	chmod +x "$NEW_BIN"
@@ -936,7 +968,7 @@ main() {
 			--binary=*) BINARY=${1#*=}; shift ;;
 			--uninstall) UNINSTALL=y; shift ;;
 			-p) SSH_PORT_ARG=${2:?-p needs a port}; shift 2 ;;
-			-h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+			-h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
 			*@*) target=$1; shift ;;
 			*) die "unknown option $1 (see --help)" ;;
 		esac
@@ -950,10 +982,11 @@ main() {
 	[[ $(uname -s) == Linux ]] || die "run this on your Linux VPS, or from your PC as: ./setup.sh user@your-vps"
 	if ((EUID != 0)); then
 		have sudo || die "run this as root"
+		[[ -f ${BASH_SOURCE[0]} ]] || die "run it as root, e.g. curl -fsSL URL | sudo bash"
 		exec sudo bash "${BASH_SOURCE[0]}" ${BINARY:+--binary "$BINARY"} ${UNINSTALL:+--uninstall}
 	fi
 	have systemctl || die "this setup needs systemd"
-	have ss || die "the ss command (iproute2) is missing"
+	have ss || { pkg_refresh; pkg_install iproute2; } || die "the ss command (iproute2) is missing"
 
 	say ""
 	say "${B}warren server setup${R}"
@@ -966,8 +999,6 @@ main() {
 	SSH_PORT=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}') || true
 	SSH_PORT=${SSH_PORT:-22}
 
-	find_binary
-
 	if [[ -f $CONFIG ]]; then
 		load_old_settings
 		header "warren is already set up here"
@@ -979,19 +1010,14 @@ main() {
 			"Quit"
 		case $REPLY in
 			1)
-				if [[ -z ${NEW_BIN:-} ]]; then
-					# No binary next to this script: download the latest release.
-					"$BIN_PATH" update ||
-						die "\"warren update\" failed. Put a new warren-linux-* binary next to setup.sh and try again"
-					exit 0
-				fi
+				find_binary
 				install_binary
 				write_unit
 				systemctl restart warren
 				ok "Restarted warren. Clients reconnect by themselves."
 				exit 0
 				;;
-			2) ;;
+			2) find_binary optional ;;
 			3)
 				LOGIN_CMD=
 				TLS_CHANGED=
@@ -1002,7 +1028,7 @@ main() {
 			5) exit 0 ;;
 		esac
 	else
-		[[ -n ${NEW_BIN:-} ]] || die "no warren binary found"
+		find_binary
 	fi
 
 	ask_questions

@@ -21,9 +21,13 @@ needs **no port forwarding on their router**.
 
 ## Guides
 
-- **[Installing the server on your VPS](docs/INSTALL.md)**: run
-  `./setup.sh user@your-vps` and answer a few questions, or follow the manual
-  steps (DNS, firewall, systemd, TLS, managing friends, troubleshooting)
+- **[Installing the server on your VPS](docs/INSTALL.md)**: on the VPS, run
+  ```sh
+  wget https://raw.githubusercontent.com/proshiv85-byte/warren/main/setup.sh
+  sudo bash setup.sh
+  ```
+  and answer a few questions. Or follow the manual steps (DNS, firewall,
+  systemd, TLS, managing friends, troubleshooting)
 - **[Using warren](docs/USAGE.md)**: for you and your friends, covering
   Minecraft, websites, other games, and troubleshooting
 

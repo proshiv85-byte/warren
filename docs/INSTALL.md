@@ -10,19 +10,25 @@ the way, including whether you have a domain. Without a domain, warren uses
 your VPS's IP address and a self-signed certificate. Everything works except
 website tunnels.
 
-**From your own computer** (needs Go and this repo), one command builds
-warren, copies it to the VPS and runs the setup there:
+**On the VPS** (SSH in first), download the script and run it:
+
+```sh
+wget https://raw.githubusercontent.com/proshiv85-byte/warren/main/setup.sh
+sudo bash setup.sh
+```
+
+It downloads warren from the latest release (checking its checksum), installs
+anything else it needs, and walks you through the rest. Nothing else to copy.
+
+**Or from your own computer** (needs Go and this repo), to install your own
+build. One command builds warren, copies it to the VPS and runs the setup there:
 
 ```sh
 ./setup.sh ubuntu@203.0.113.10          # add -p 2222 if SSH isn't on port 22
 ```
 
-**Or on the VPS itself**, with `warren-linux-amd64` (from `make dist`) and
-`setup.sh` copied into the same folder:
-
-```sh
-sudo bash setup.sh
-```
+(If a `warren-linux-*` binary is next to `setup.sh` on the VPS, it uses that
+instead of downloading.)
 
 At the end it prints your login command. Run `setup.sh` again any time to
 update warren, change settings or add a user (tokens are kept), or with
