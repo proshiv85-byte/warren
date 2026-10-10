@@ -1,0 +1,19 @@
+{
+	"schemaVersion": 1,
+	"id": "warren",
+	"version": "${version}",
+	"name": "warren",
+	"description": "Share your Open to LAN world through your own warren server with /warren open. Friends don't need the mod.",
+	"license": "MIT",
+	"environment": "*",
+	"entrypoints": {
+		"main": ["dev.warren.mc.WarrenMod"],
+		"client": ["dev.warren.mc.WarrenClient"]
+	},
+	"depends": {
+		"fabricloader": ">=0.17.0",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}

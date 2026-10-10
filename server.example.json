@@ -1,0 +1,13 @@
+{
+  "listen": ":7000",
+  "domain": "tunnel.example.com",
+  "tls_cert": "",
+  "tls_key": "",
+  "http_addr": ":80",
+  "https_addr": "",
+  "https_cert": "",
+  "https_key": "",
+  "port_min": 1024,
+  "port_max": 65535,
+  "users": []
+}

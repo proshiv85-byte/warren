@@ -1,0 +1,19 @@
+# build output
+/warren
+/warren.exe
+/dist/
+
+# local configs and secrets: these hold tokens, never commit them
+server.json
+server.json.bak
+client.json
+warren.json
+*.pem
+*.key
+.env
+
+# editor / tool state
+.idea/
+.vscode/
+.claude/
+*.log

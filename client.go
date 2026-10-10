@@ -1,0 +1,300 @@
+package main
+
+import (
+	"bufio"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultControlPort = "7000"
+
+type clientConfig struct {
+	Server   string `json:"server"`
+	Token    string `json:"token"`
+	TLS      bool   `json:"tls,omitempty"`
+	Insecure bool   `json:"insecure,omitempty"`
+}
+
+func clientConfigPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "warren", "client.json"), nil
+}
+
+func loadClientConfig() clientConfig {
+	var cfg clientConfig
+	if p, err := clientConfigPath(); err == nil {
+		if b, err := os.ReadFile(p); err == nil {
+			json.Unmarshal(b, &cfg)
+		}
+	}
+	if v := os.Getenv("WARREN_SERVER"); v != "" {
+		cfg.Server = v
+	}
+	if v := os.Getenv("WARREN_TOKEN"); v != "" {
+		cfg.Token = v
+	}
+	return cfg
+}
+
+func cmdLogin(args []string) error {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	server := fs.String("server", "", "server address, host[:port]")
+	token := fs.String("token", "", "your token")
+	useTLS := fs.Bool("tls", false, "connect to the server using TLS")
+	insecure := fs.Bool("insecure", false, "with --tls, skip certificate verification")
+	if _, err := parseArgs(fs, args); err != nil {
+		return err
+	}
+	if *server == "" || *token == "" {
+		return errors.New("usage: warren login --server HOST[:PORT] --token TOKEN [--tls]")
+	}
+	p, err := clientConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(clientConfig{Server: *server, Token: *token, TLS: *useTLS, Insecure: *insecure}, "", "  ")
+	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("Saved to %s\nNow try: warren tcp 25565\n", p)
+	return nil
+}
+
+type client struct {
+	server     string
+	token      string
+	useTLS     bool
+	insecure   bool
+	proto      string
+	local      string
+	port       int
+	subdomain  string
+	proxyProto bool
+	online     bool
+}
+
+type fatalError struct{ msg string }
+
+func (e fatalError) Error() string { return e.msg }
+
+func cmdTunnel(proto string, args []string) error {
+	cfg := loadClientConfig()
+	fs := flag.NewFlagSet(proto, flag.ExitOnError)
+	server := fs.String("server", cfg.Server, "server address, host[:port] (default: from warren login)")
+	token := fs.String("token", cfg.Token, "auth token (default: from warren login)")
+	useTLS := fs.Bool("tls", cfg.TLS, "connect to the server using TLS")
+	insecure := fs.Bool("insecure", cfg.Insecure, "with --tls, skip certificate verification")
+	c := &client{proto: proto}
+	if proto == "http" {
+		fs.StringVar(&c.subdomain, "subdomain", "", "subdomain to request (default: random)")
+	} else {
+		fs.IntVar(&c.port, "port", 0, "public port to request on the server (default: random)")
+	}
+	if proto != "udp" {
+		fs.BoolVar(&c.proxyProto, "proxy-protocol", false, "send a PROXY protocol v1 header so the local server sees real visitor IPs")
+	}
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: warren %s LOCAL [flags]\n\nLOCAL is a port (25565) or host:port.\n\n", proto)
+		fs.PrintDefaults()
+	}
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		fs.Usage()
+		os.Exit(2)
+	}
+	if *server == "" || *token == "" {
+		return errors.New("no server/token configured: run \"warren login --server HOST --token TOKEN\" first")
+	}
+
+	c.server, c.token, c.useTLS, c.insecure = *server, *token, *useTLS, *insecure
+	if _, _, err := net.SplitHostPort(c.server); err != nil {
+		c.server = net.JoinHostPort(c.server, defaultControlPort)
+	}
+	c.local = pos[0]
+	if _, err := strconv.Atoi(c.local); err == nil {
+		c.local = "127.0.0.1:" + c.local
+	}
+	return c.run()
+}
+
+func (c *client) run() error {
+	backoff := time.Second
+	for {
+		start := time.Now()
+		err := c.session()
+		var fe fatalError
+		if errors.As(err, &fe) {
+			return err
+		}
+		if time.Since(start) > time.Minute {
+			backoff = time.Second
+		}
+		if !c.online && errors.Is(err, io.EOF) && !c.useTLS {
+			err = fmt.Errorf("%w (if the server uses TLS, add --tls)", err)
+		}
+		log.Printf("disconnected (%v), reconnecting in %s", err, backoff)
+		time.Sleep(backoff)
+		backoff = min(backoff*2, 30*time.Second)
+	}
+}
+
+func (c *client) dial() (net.Conn, error) {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if !c.useTLS {
+		return d.Dial("tcp", c.server)
+	}
+	host, _, _ := net.SplitHostPort(c.server)
+	return tls.DialWithDialer(d, "tcp", c.server, &tls.Config{ServerName: host, InsecureSkipVerify: c.insecure})
+}
+
+func (c *client) session() error {
+	conn, err := c.dial()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(15 * time.Second))
+	err = writeMsg(conn, Msg{Type: "hello", Version: protoVersion, Token: c.token,
+		Proto: c.proto, Port: c.port, Subdomain: c.subdomain})
+	if err != nil {
+		return err
+	}
+	br := bufio.NewReader(conn)
+	m, err := readMsg(br)
+	if err != nil {
+		return err
+	}
+	if m.Type == "error" {
+		if m.Fatal || !c.online {
+			// Errors on the very first connect (port taken, bad
+			// subdomain...) won't fix themselves, so don't retry forever.
+			return fatalError{"server: " + m.Error}
+		}
+		return errors.New("server: " + m.Error)
+	}
+	if m.Type != "ok" {
+		return fmt.Errorf("unexpected reply %q", m.Type)
+	}
+	conn.SetDeadline(time.Time{})
+
+	// Ask for the same port/subdomain again if we have to reconnect.
+	c.port, c.subdomain = m.Port, m.Subdomain
+	if !c.online {
+		fmt.Printf("\n  warren is online\n\n  %s  ->  %s\n\n", m.URL, c.local)
+		if c.proto != "http" {
+			fmt.Printf("  people connect to: %s\n\n", strings.TrimPrefix(m.URL, c.proto+"://"))
+		}
+		c.online = true
+	} else {
+		log.Printf("reconnected: %s", m.URL)
+	}
+
+	for {
+		conn.SetReadDeadline(time.Now().Add(controlTimeout))
+		m, err := readMsg(br)
+		if err != nil {
+			return err
+		}
+		switch m.Type {
+		case "ping":
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := writeMsg(conn, Msg{Type: "pong"}); err != nil {
+				return err
+			}
+		case "conn":
+			go c.handleStream(m.ID, m.Remote)
+		case "error":
+			if m.Fatal {
+				return fatalError{"server: " + m.Error}
+			}
+			return errors.New("server: " + m.Error)
+		}
+	}
+}
+
+func (c *client) handleStream(id, remote string) {
+	var local net.Conn
+	var localErr error
+	if c.proto != "udp" {
+		local, localErr = net.DialTimeout("tcp", c.local, 5*time.Second)
+	}
+
+	data, err := c.dial()
+	if err != nil {
+		log.Printf("opening stream: %v", err)
+		if local != nil {
+			local.Close()
+		}
+		return
+	}
+	data.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if err := writeMsg(data, Msg{Type: "join", ID: id}); err != nil {
+		data.Close()
+		if local != nil {
+			local.Close()
+		}
+		return
+	}
+	data.SetWriteDeadline(time.Time{})
+
+	if c.proto == "udp" {
+		clientUDP(data, c.local, remote)
+		return
+	}
+	if localErr != nil {
+		log.Printf("connection from %s, but nothing is listening on %s: %v", remote, c.local, localErr)
+		if c.proto == "http" {
+			httpError(data, 502, "warren: the local service at "+c.local+" is not running")
+		} else {
+			data.Close()
+		}
+		return
+	}
+	log.Printf("connection from %s", remote)
+	if c.proxyProto {
+		local.Write([]byte(proxyHeader(remote, local.RemoteAddr().String())))
+	}
+	pipe(data, local)
+}
+
+// proxyHeader builds a PROXY protocol v1 line describing the visitor.
+func proxyHeader(src, dst string) string {
+	sh, sp, err1 := net.SplitHostPort(src)
+	dh, dp, err2 := net.SplitHostPort(dst)
+	sip, dip := net.ParseIP(sh), net.ParseIP(dh)
+	if err1 != nil || err2 != nil || sip == nil || dip == nil {
+		return "PROXY UNKNOWN\r\n"
+	}
+	if s4 := sip.To4(); s4 != nil {
+		d4 := dip.To4()
+		if d4 == nil {
+			d4 = net.IPv4zero
+		}
+		return fmt.Sprintf("PROXY TCP4 %s %s %s %s\r\n", s4, d4, sp, dp)
+	}
+	if dip.To4() != nil {
+		dip = net.IPv6unspecified
+	}
+	return fmt.Sprintf("PROXY TCP6 %s %s %s %s\r\n", sip, dip, sp, dp)
+}
