@@ -58,8 +58,10 @@ func cmdUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if exe, err = filepath.EvalSymlinks(exe); err != nil {
-		return err
+	// Update the real file if warren is a symlink. Resolving can fail on
+	// some Windows drives (network, OneDrive, Wine); the plain path is fine then.
+	if real, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = real
 	}
 	// Fail early, before downloading, if we can't write next to the binary.
 	tmp, err := os.CreateTemp(filepath.Dir(exe), ".warren-update-*")
