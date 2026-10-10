@@ -7,7 +7,9 @@ Minecraft 1.21.11.
 ## Install
 
 1. Install [Fabric Loader](https://fabricmc.net/use/) for 1.21.11 and put
-   [Fabric API](https://modrinth.com/mod/fabric-api) and `warren-0.1.0.jar`
+   [Fabric API](https://modrinth.com/mod/fabric-api) and the warren mod
+   (`warren-mod-…+mc1.21.11.jar` from the
+   [releases page](https://github.com/proshiv85-byte/warren/releases))
    into your `mods` folder.
 2. Log in once. In a world, type `/warren login` (or press **Esc → Open to
    LAN → warren…**) and fill in the settings window:

@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 const usageText = `warren - self-hosted tunnels (TCP, UDP, HTTP)
 
