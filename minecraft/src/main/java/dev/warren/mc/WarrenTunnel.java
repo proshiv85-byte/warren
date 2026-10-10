@@ -13,6 +13,8 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -296,7 +298,7 @@ final class WarrenTunnel {
 			SSLSocket ssl = (SSLSocket) tlsFactory().createSocket(raw, host, controlPort, true);
 			sockets.remove(raw); // closed together with ssl from now on
 			track(ssl);
-			if (!cfg.insecure) {
+			if (!cfg.insecure && !pinned()) {
 				SSLParameters params = ssl.getSSLParameters();
 				params.setEndpointIdentificationAlgorithm("HTTPS");
 				ssl.setSSLParameters(params);
@@ -310,9 +312,22 @@ final class WarrenTunnel {
 		}
 	}
 
+	private boolean pinned() {
+		return !cfg.fingerprint.isEmpty();
+	}
+
+	/**
+	 * With a fingerprint, the only certificate trusted is the one whose
+	 * public key matches it (self-signed certificates have no CA to check).
+	 * With "insecure" and no fingerprint, any certificate is accepted.
+	 */
 	private SSLSocketFactory tlsFactory() throws IOException {
-		if (!cfg.insecure) {
+		if (!cfg.insecure && !pinned()) {
 			return (SSLSocketFactory) SSLSocketFactory.getDefault();
+		}
+		byte[] pin = pinned() ? cfg.pinnedKeyHash() : null;
+		if (pinned() && pin == null) {
+			throw new FatalException("bad fingerprint \"" + cfg.fingerprint + "\"");
 		}
 		try {
 			SSLContext ctx = SSLContext.getInstance("TLS");
@@ -321,7 +336,24 @@ final class WarrenTunnel {
 				public void checkClientTrusted(X509Certificate[] chain, String authType) {}
 
 				@Override
-				public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+				public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+					if (pin == null) {
+						return;
+					}
+					if (chain == null || chain.length == 0) {
+						throw new CertificateException("the server sent no certificate");
+					}
+					byte[] got;
+					try {
+						got = MessageDigest.getInstance("SHA-256").digest(chain[0].getPublicKey().getEncoded());
+					} catch (GeneralSecurityException e) {
+						throw new CertificateException(e);
+					}
+					if (!MessageDigest.isEqual(got, pin)) {
+						throw new CertificateException("the server's certificate doesn't match the fingerprint"
+							+ " (if the server owner made a new certificate, ask them for the new one)");
+					}
+				}
 
 				@Override
 				public X509Certificate[] getAcceptedIssuers() {

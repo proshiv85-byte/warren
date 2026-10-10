@@ -154,6 +154,9 @@ func (srv *Server) run() error {
 	}
 	log.Printf("warren %s: control port %s (tls=%v), domain %s, ports %d-%d, %d users",
 		version, cfg.Listen, cfg.TLSCert != "", cfg.Domain, cfg.PortMin, cfg.PortMax, len(cfg.Users))
+	if cfg.TLSCert == "" {
+		log.Printf("WARNING: tls_cert is not set, so tokens travel unencrypted; anyone on the path can steal them")
+	}
 
 	if cfg.HTTPAddr != "" {
 		hl, err := net.Listen("tcp", cfg.HTTPAddr)
@@ -326,6 +329,15 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 	}
 	s.user, s.token = user.Name, user.Token
 
+	// Claim first: a reconnecting client asks for its old port/subdomain,
+	// which kicks its own stale session, so that one isn't counted below.
+	ok, cleanup, err := srv.setupTunnel(s, hello)
+	if err != nil {
+		fail(false, "%v", err)
+		return
+	}
+	defer cleanup()
+
 	srv.mu.Lock()
 	n := 0
 	for o := range srv.sessions {
@@ -340,18 +352,14 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 	}
 	srv.sessions[s] = struct{}{}
 	srv.mu.Unlock()
+	// Runs before cleanup releases the claim, so whoever claims it next
+	// never counts this session.
 	defer func() {
 		srv.mu.Lock()
 		delete(srv.sessions, s)
 		srv.mu.Unlock()
 	}()
 
-	ok, cleanup, err := srv.setupTunnel(s, hello)
-	if err != nil {
-		fail(false, "%v", err)
-		return
-	}
-	defer cleanup()
 	if err := s.send(ok); err != nil {
 		return
 	}
@@ -647,30 +655,49 @@ func cmdAddUser(args []string) error {
 	login := fmt.Sprintf("warren login --server %s:%s --token %s", cfg.Domain, port, token)
 	if cfg.TLSCert != "" {
 		login += " --tls"
-		if selfSigned(cfg.TLSCert) {
-			login += " --insecure"
+		if cert, err := readCert(cfg.TLSCert); err == nil && cert.CheckSignatureFrom(cert) == nil {
+			// Self-signed: clients can't verify it the usual way, so they
+			// pin its key instead.
+			login += " --fingerprint " + certFingerprint(cert)
 		}
 	}
 	fmt.Printf("Added user %q. Send them this command:\n\n  %s\n\n", pos[0], login)
 	return nil
 }
 
-// selfSigned reports whether the certificate in path signed itself, in which
-// case clients can't verify it and need --insecure.
-func selfSigned(path string) bool {
+// readCert parses the first certificate in a PEM file.
+func readCert(path string) (*x509.Certificate, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return nil, err
 	}
 	block, _ := pem.Decode(b)
 	if block == nil {
-		return false
+		return nil, fmt.Errorf("%s: no PEM certificate found", path)
 	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	return x509.ParseCertificate(block.Bytes)
+}
+
+// cmdFingerprint prints the fingerprint clients pin with --fingerprint.
+func cmdFingerprint(args []string) error {
+	fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConfigPath(), "path to server config (or set WARREN_CONFIG)")
+	if _, err := parseArgs(fs, args); err != nil {
+		return err
+	}
+	cfg, err := loadServerConfig(*cfgPath)
 	if err != nil {
-		return false
+		return err
 	}
-	return cert.CheckSignatureFrom(cert) == nil
+	if cfg.TLSCert == "" {
+		return errors.New("the control port doesn't use TLS (no tls_cert in the config)")
+	}
+	cert, err := readCert(cfg.TLSCert)
+	if err != nil {
+		return err
+	}
+	fmt.Println(certFingerprint(cert))
+	return nil
 }
 
 func cmdDelUser(args []string) error {

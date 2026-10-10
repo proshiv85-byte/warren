@@ -13,7 +13,7 @@ var version = "0.3.0"
 const usageText = `warren - self-hosted tunnels (TCP, UDP, HTTP)
 
 Client:
-  warren login --server HOST[:PORT] --token TOKEN [--tls]
+  warren login --server HOST[:PORT] --token TOKEN [--tls] [--fingerprint sha256:...]
                                    save server address and token
   warren tcp  LOCAL [--port N]     expose a TCP service (e.g. Minecraft Java)
   warren udp  LOCAL [--port N]     expose a UDP service (e.g. Minecraft Bedrock)
@@ -33,6 +33,7 @@ Server (config: --config FILE, $WARREN_CONFIG, or /etc/warren/server.json):
   warren adduser NAME              create a user and print their login command
   warren deluser NAME              remove a user
   warren users                     list users
+  warren fingerprint               print the TLS fingerprint clients pin with --fingerprint
 
   warren update                    update warren to the latest release
   warren update --check            only check whether there's a newer version
@@ -74,6 +75,8 @@ func main() {
 		err = cmdDelUser(args)
 	case "users":
 		err = cmdUsers(args)
+	case "fingerprint":
+		err = cmdFingerprint(args)
 	case "update":
 		err = cmdUpdate(args)
 	case "version", "--version":

@@ -33,6 +33,8 @@ final class WarrenSettingsScreen extends Screen {
 	private boolean applyingPaste;
 	private String lastServer = "";
 	private String lastToken = "";
+	/** Not shown on screen; comes from the config or a pasted login command. */
+	private String pastedFingerprint;
 
 	WarrenSettingsScreen(Screen parent) {
 		super(Component.literal("warren settings"));
@@ -45,6 +47,7 @@ final class WarrenSettingsScreen extends Screen {
 			error = e.getMessage();
 		}
 		this.initial = cfg;
+		this.pastedFingerprint = cfg.fingerprint;
 	}
 
 	private static Path configDir() {
@@ -135,7 +138,7 @@ final class WarrenSettingsScreen extends Screen {
 		if (applyingPaste || !pasted || !(text.contains("--token") || text.contains("--server"))) {
 			return;
 		}
-		String server = null, token = null;
+		String server = null, token = null, fingerprint = "";
 		boolean tls = false, insecure = false;
 		String[] words = text.trim().split("\\s+");
 		for (int i = 0; i < words.length; i++) {
@@ -145,7 +148,7 @@ final class WarrenSettingsScreen extends Screen {
 			if (eq > 0) {
 				value = w.substring(eq + 1);
 				w = w.substring(0, eq);
-			} else if ((w.equals("--server") || w.equals("--token")) && i + 1 < words.length) {
+			} else if ((w.equals("--server") || w.equals("--token") || w.equals("--fingerprint")) && i + 1 < words.length) {
 				value = words[++i];
 			}
 			switch (w) {
@@ -153,10 +156,15 @@ final class WarrenSettingsScreen extends Screen {
 				case "--token" -> token = value;
 				case "--tls" -> tls = value == null || value.equals("true");
 				case "--insecure" -> insecure = value == null || value.equals("true");
+				case "--fingerprint" -> {
+					fingerprint = value == null ? "" : value;
+					tls = true;
+				}
 				default -> {
 				}
 			}
 		}
+		pastedFingerprint = fingerprint;
 		applyingPaste = true;
 		serverBox.setValue(server != null ? server : serverBox == getFocused() ? "" : serverBox.getValue());
 		tokenBox.setValue(token != null ? token : tokenBox == getFocused() ? "" : tokenBox.getValue());
@@ -178,6 +186,7 @@ final class WarrenSettingsScreen extends Screen {
 		cfg.token = tokenBox.getValue().trim();
 		cfg.tls = tlsBox.selected();
 		cfg.insecure = insecureBox.selected();
+		cfg.fingerprint = pastedFingerprint;
 		cfg.port = portBox.getValue().isEmpty() ? 0 : Integer.parseInt(portBox.getValue());
 
 		error = cfg.server.isEmpty() || cfg.token.isEmpty()

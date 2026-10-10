@@ -25,12 +25,21 @@ func (srv *Server) serveHTTP(ln net.Listener) {
 	}
 }
 
+// maxHeaderBytes caps how much of a request is read before it's routed,
+// so nobody can make the server buffer endless headers.
+const maxHeaderBytes = 64 << 10
+
 func (srv *Server) handleHTTP(c net.Conn) {
 	c.SetReadDeadline(time.Now().Add(30 * time.Second))
 	var seen bytes.Buffer
-	req, err := http.ReadRequest(bufio.NewReader(io.TeeReader(c, &seen)))
+	r := io.LimitReader(io.TeeReader(c, &seen), maxHeaderBytes)
+	req, err := http.ReadRequest(bufio.NewReader(r))
 	if err != nil {
-		c.Close()
+		if seen.Len() >= maxHeaderBytes {
+			httpError(c, 431, "warren: request headers too large")
+		} else {
+			c.Close()
+		}
 		return
 	}
 	c.SetReadDeadline(time.Time{})

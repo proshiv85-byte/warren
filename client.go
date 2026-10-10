@@ -24,6 +24,8 @@ type clientConfig struct {
 	Token    string `json:"token"`
 	TLS      bool   `json:"tls,omitempty"`
 	Insecure bool   `json:"insecure,omitempty"`
+	// Pinned server key ("sha256:..."), for self-signed certificates.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 func clientConfigPath() (string, error) {
@@ -55,12 +57,20 @@ func cmdLogin(args []string) error {
 	server := fs.String("server", "", "server address, host[:port]")
 	token := fs.String("token", "", "your token")
 	useTLS := fs.Bool("tls", false, "connect to the server using TLS")
-	insecure := fs.Bool("insecure", false, "with --tls, skip certificate verification")
+	insecure := fs.Bool("insecure", false, "with --tls, skip certificate verification (prefer --fingerprint)")
+	fingerprint := fs.String("fingerprint", "", "with --tls, trust only the server key with this fingerprint (for self-signed certificates)")
 	if _, err := parseArgs(fs, args); err != nil {
 		return err
 	}
 	if *server == "" || *token == "" {
-		return errors.New("usage: warren login --server HOST[:PORT] --token TOKEN [--tls]")
+		return errors.New("usage: warren login --server HOST[:PORT] --token TOKEN [--tls] [--fingerprint sha256:...]")
+	}
+	if *fingerprint != "" {
+		fp, err := normalizeFingerprint(*fingerprint)
+		if err != nil {
+			return err
+		}
+		*fingerprint, *useTLS = fp, true
 	}
 	p, err := clientConfigPath()
 	if err != nil {
@@ -69,11 +79,20 @@ func cmdLogin(args []string) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(clientConfig{Server: *server, Token: *token, TLS: *useTLS, Insecure: *insecure}, "", "  ")
+	b, _ := json.MarshalIndent(clientConfig{Server: *server, Token: *token, TLS: *useTLS,
+		Insecure: *insecure, Fingerprint: *fingerprint}, "", "  ")
 	if err := os.WriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("Saved to %s\nNow try: warren tcp 25565\n", p)
+	fmt.Printf("Saved to %s\n", p)
+	switch {
+	case !*useTLS:
+		fmt.Println("Warning: without --tls your token is sent unencrypted.")
+	case *insecure && *fingerprint == "":
+		fmt.Println("Warning: --insecure accepts any certificate, so your token can be intercepted.\n" +
+			"Ask the server owner for the fingerprint (\"warren fingerprint\" on the server) and use --fingerprint instead.")
+	}
+	fmt.Println("Now try: warren tcp 25565")
 	return nil
 }
 
@@ -82,6 +101,7 @@ type client struct {
 	token      string
 	useTLS     bool
 	insecure   bool
+	pin        string
 	proto      string
 	local      string
 	port       int
@@ -100,7 +120,8 @@ func cmdTunnel(proto string, args []string) error {
 	server := fs.String("server", cfg.Server, "server address, host[:port] (default: from warren login)")
 	token := fs.String("token", cfg.Token, "auth token (default: from warren login)")
 	useTLS := fs.Bool("tls", cfg.TLS, "connect to the server using TLS")
-	insecure := fs.Bool("insecure", cfg.Insecure, "with --tls, skip certificate verification")
+	insecure := fs.Bool("insecure", cfg.Insecure, "with --tls, skip certificate verification (prefer --fingerprint)")
+	fingerprint := fs.String("fingerprint", cfg.Fingerprint, "with --tls, trust only the server key with this fingerprint")
 	c := &client{proto: proto}
 	if proto == "http" {
 		fs.StringVar(&c.subdomain, "subdomain", "", "subdomain to request (default: random)")
@@ -127,6 +148,12 @@ func cmdTunnel(proto string, args []string) error {
 	}
 
 	c.server, c.token, c.useTLS, c.insecure = *server, *token, *useTLS, *insecure
+	if *fingerprint != "" {
+		if c.pin, err = normalizeFingerprint(*fingerprint); err != nil {
+			return err
+		}
+		c.useTLS = true
+	}
 	if _, _, err := net.SplitHostPort(c.server); err != nil {
 		c.server = net.JoinHostPort(c.server, defaultControlPort)
 	}
@@ -144,6 +171,11 @@ func (c *client) run() error {
 		err := c.session()
 		var fe fatalError
 		if errors.As(err, &fe) {
+			return err
+		}
+		if !c.online && errors.Is(err, errPinMismatch) {
+			// A different key won't change by retrying: either the server
+			// got a new certificate or someone is intercepting.
 			return err
 		}
 		if time.Since(start) > time.Minute {
@@ -164,8 +196,26 @@ func (c *client) dial() (net.Conn, error) {
 		return d.Dial("tcp", c.server)
 	}
 	host, _, _ := net.SplitHostPort(c.server)
-	return tls.DialWithDialer(d, "tcp", c.server, &tls.Config{ServerName: host, InsecureSkipVerify: c.insecure})
+	cfg := &tls.Config{ServerName: host, InsecureSkipVerify: c.insecure}
+	if c.pin != "" {
+		// The pin replaces the usual CA check (self-signed certificates
+		// have no CA), so a mismatch is the only thing that fails.
+		cfg.InsecureSkipVerify = true
+		cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errPinMismatch
+			}
+			if got := certFingerprint(cs.PeerCertificates[0]); got != c.pin {
+				return fmt.Errorf("%w: server has %s, expected %s", errPinMismatch, got, c.pin)
+			}
+			return nil
+		}
+	}
+	return tls.DialWithDialer(d, "tcp", c.server, cfg)
 }
+
+var errPinMismatch = errors.New("the server's certificate doesn't match --fingerprint " +
+	"(if the server owner made a new certificate, ask them for the new fingerprint)")
 
 func (c *client) session() error {
 	conn, err := c.dial()

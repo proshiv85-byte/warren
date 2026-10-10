@@ -918,8 +918,8 @@ finish() {
 		say "  command again with the right flags:"
 		case $TLS_MODE in
 			le|cloudflare) say "    add --tls" ;;
-			self) say "    add --tls --insecure" ;;
-			none) say "    remove --tls and --insecure" ;;
+			self) say "    add --tls --fingerprint $("$BIN_PATH" fingerprint --config "$CONFIG" 2>/dev/null || echo '(run: warren fingerprint)')" ;;
+			none) say "    remove --tls, --insecure and --fingerprint" ;;
 		esac
 		say ""
 	fi

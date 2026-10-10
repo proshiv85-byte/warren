@@ -8,7 +8,10 @@ your friends can use. It takes about 15 minutes.
 `setup.sh` does everything in this guide for you and asks a few questions on
 the way, including whether you have a domain. Without a domain, warren uses
 your VPS's IP address and a self-signed certificate. Everything works except
-website tunnels.
+website tunnels. Login commands for a self-signed server include
+`--fingerprint sha256:…`, which lets clients check they're talking to your
+server even though no certificate authority vouches for it. Print it any time
+with `sudo -u warren warren fingerprint`.
 
 **On the VPS** (SSH in first), download the script and run it:
 
