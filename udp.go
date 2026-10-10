@@ -37,6 +37,10 @@ func (srv *Server) serveUDP(pc *net.UDPConn, s *session) {
 		mu.Lock()
 		f := flows[key]
 		if f == nil {
+			if !s.reserveConn() {
+				mu.Unlock()
+				continue // drop it, like a full network would
+			}
 			f = &udpFlow{ch: make(chan []byte, 256)}
 			f.touch()
 			flows[key] = f
@@ -45,6 +49,7 @@ func (srv *Server) serveUDP(pc *net.UDPConn, s *session) {
 				mu.Lock()
 				delete(flows, key)
 				mu.Unlock()
+				s.releaseConn()
 			}()
 		}
 		mu.Unlock()

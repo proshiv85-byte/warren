@@ -57,6 +57,7 @@ warren update                             # update to the latest release
 | `listen` | Control port that clients connect to (default `:7000`) |
 | `domain` | Your tunnel domain |
 | `port_min` / `port_max` | Ports users may claim for TCP/UDP tunnels |
+| `max_conns_per_tunnel` | Visitors one tunnel may have connected at once (default `1000`) |
 | `http_addr` | Address for website tunnels, e.g. `:80`. Leave empty to disable |
 | `https_addr`, `https_cert`, `https_key` | HTTPS for website tunnels; the cert must cover `*.domain` |
 | `public_http_port` | Port shown in website URLs when a reverse proxy sits in front |

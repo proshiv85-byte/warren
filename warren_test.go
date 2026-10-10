@@ -38,6 +38,13 @@ func freePort(t *testing.T) int {
 // control address. edit can adjust the config before it starts.
 func startServer(t *testing.T, edit func(*ServerConfig)) (string, *ServerConfig) {
 	t.Helper()
+	return startServerWith(t, edit, nil)
+}
+
+// startServerWith is startServer, plus tweak can adjust the server (its
+// limits, say) before it starts.
+func startServerWith(t *testing.T, edit func(*ServerConfig), tweak func(*Server)) (string, *ServerConfig) {
+	t.Helper()
 	cfg := &ServerConfig{
 		Listen:  fmt.Sprintf("127.0.0.1:%d", freePort(t)),
 		Domain:  "tunnel.test",
@@ -56,13 +63,9 @@ func startServer(t *testing.T, edit func(*ServerConfig)) (string, *ServerConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &Server{
-		cfgPath:  path,
-		cfg:      cfg,
-		users:    cfg.Users,
-		sessions: map[*session]struct{}{},
-		claims:   map[string]*session{},
-		pending:  map[string]chan net.Conn{},
+	srv := newServer(path, cfg)
+	if tweak != nil {
+		tweak(srv)
 	}
 	go srv.run()
 	waitDial(t, "tcp", cfg.Listen)
@@ -456,5 +459,276 @@ func TestReadLineLimit(t *testing.T) {
 	line, err := readLine(strings.NewReader("ok\nrest"), 10)
 	if err != nil || string(line) != "ok" {
 		t.Fatalf("got %q, %v", line, err)
+	}
+}
+
+// expectClosed checks the server hangs up on c promptly (well before any
+// stream timeout) instead of serving it.
+func expectClosed(t *testing.T, c net.Conn, what string) {
+	t.Helper()
+	c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if n, err := c.Read(make([]byte, 1)); err == nil || os.IsTimeout(err) {
+		t.Fatalf("%s: still open (read %d bytes, %v)", what, n, err)
+	}
+}
+
+func TestTunnelConnLimit(t *testing.T) {
+	server, _ := startServer(t, func(c *ServerConfig) { c.MaxConnsPerTunnel = 2 })
+	port := freePort(t)
+	startClient(t, server, "tcp", echoTCP(t), port, "")
+	pub := fmt.Sprintf("127.0.0.1:%d", port)
+	waitDial(t, "tcp", pub)
+
+	// echoOK dials a visitor and reports whether it got through.
+	echoOK := func() (net.Conn, bool) {
+		c, err := net.Dial("tcp", pub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.SetDeadline(time.Now().Add(time.Second))
+		c.Write([]byte("x"))
+		if _, err := io.ReadFull(c, make([]byte, 1)); err != nil {
+			c.Close()
+			return nil, false
+		}
+		c.SetDeadline(time.Time{})
+		return c, true
+	}
+
+	// Fill both slots. waitDial's probe may hold one for a moment while it
+	// closes, so retry until both visitors get through.
+	var open []net.Conn
+	deadline := time.Now().Add(5 * time.Second)
+	for len(open) < 2 {
+		c, ok := echoOK()
+		if ok {
+			defer c.Close()
+			open = append(open, c)
+			continue
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("couldn't connect 2 visitors under a limit of 2")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	extra, err := net.Dial("tcp", pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	expectClosed(t, extra, "third visitor over a limit of 2")
+
+	// Once a visitor leaves, there's room again.
+	open[0].Close()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if c, ok := echoOK(); ok {
+			c.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no room after a visitor left")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// A client that doesn't answer "conn" messages only gets a bounded number
+// of them; further visitors are turned away right away.
+func TestPendingStreamLimit(t *testing.T) {
+	server, _ := startServerWith(t, nil, func(s *Server) { s.limits.pendingStreams = 3 })
+	port := freePort(t)
+	ctrl, ok := hello(t, server, Msg{Proto: "tcp", Port: port})
+	if ok.Type != "ok" {
+		t.Fatalf("%+v", ok)
+	}
+	pub := fmt.Sprintf("127.0.0.1:%d", port)
+	var visitors []net.Conn
+	for i := 0; i < 6; i++ {
+		c, err := net.Dial("tcp", pub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		visitors = append(visitors, c)
+	}
+
+	got := 0
+	br := bufio.NewReader(ctrl)
+	for {
+		ctrl.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+		m, err := readMsg(br)
+		if err != nil {
+			break
+		}
+		if m.Type == "conn" {
+			got++
+		}
+	}
+	if got != 3 {
+		t.Fatalf("client was asked for %d streams, want 3", got)
+	}
+	// The other 3 (whichever lost the race for a slot) are turned away
+	// right away rather than after the stream timeout.
+	closed := make(chan bool, len(visitors))
+	for _, c := range visitors {
+		go func(c net.Conn) {
+			c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			_, err := c.Read(make([]byte, 1))
+			closed <- err != nil && !os.IsTimeout(err)
+		}(c)
+	}
+	n := 0
+	for range visitors {
+		if <-closed {
+			n++
+		}
+	}
+	if n != 3 {
+		t.Fatalf("%d visitors were turned away, want 3", n)
+	}
+}
+
+func TestHandshakeLimitPerIP(t *testing.T) {
+	server, _ := startServerWith(t, nil, func(s *Server) { s.limits.handshakesIP = 3 })
+	time.Sleep(200 * time.Millisecond) // let startServer's probe free its slot
+	var idle []net.Conn
+	for i := 0; i < 3; i++ {
+		c, err := net.Dial("tcp", server)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		idle = append(idle, c)
+	}
+	time.Sleep(200 * time.Millisecond) // let the server accept them
+
+	extra, err := net.Dial("tcp", server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	expectClosed(t, extra, "fourth silent connection from one IP")
+
+	// Connections that finish their handshake free their slot.
+	idle[0].Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.Dial("tcp", server)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeMsg(c, Msg{Type: "hello", Version: protoVersion, Token: testToken, Proto: "tcp"})
+		c.SetReadDeadline(time.Now().Add(time.Second))
+		m, err := readMsg(c)
+		c.Close()
+		if err == nil && m.Type == "ok" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no room after a connection left: %+v %v", m, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestHTTPBusy(t *testing.T) {
+	server, cfg := startServer(t, func(c *ServerConfig) {
+		c.HTTPAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t))
+		c.MaxConnsPerTunnel = 1
+	})
+	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	go func() {
+		for {
+			c, err := backend.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				first, _ := br.ReadString('\n')
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil || line == "\r\n" {
+						break
+					}
+				}
+				if strings.HasPrefix(first, "GET /hold ") {
+					io.Copy(io.Discard, br) // keep this visitor connected
+					return
+				}
+				fmt.Fprint(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
+			}()
+		}
+	}()
+	startClient(t, server, "http", backend.Addr().String(), 0, "alice")
+
+	get := func(path string) string {
+		c, err := net.Dial("tcp", cfg.HTTPAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: alice.tunnel.test\r\n\r\n", path)
+		b, _ := io.ReadAll(c)
+		return string(b)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.HasSuffix(get("/"), "hi") {
+		if time.Now().After(deadline) {
+			t.Fatal("tunnel never answered")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Occupy the one slot. The previous probe may still hold it for a
+	// moment, in which case this gets the 503 itself; retry until it sticks
+	// (no answer means the backend is holding it).
+	for {
+		hold, err := net.Dial("tcp", cfg.HTTPAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer hold.Close()
+		fmt.Fprint(hold, "GET /hold HTTP/1.1\r\nHost: alice.tunnel.test\r\n\r\n")
+		hold.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		if _, err := hold.Read(make([]byte, 1)); os.IsTimeout(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("couldn't occupy the tunnel's only slot")
+		}
+	}
+	for {
+		got := get("/")
+		if strings.HasPrefix(got, "HTTP/1.1 503") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("over the limit: got %q, want a 503", got)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestMaxConnsPerTunnelConfig(t *testing.T) {
+	dir := t.TempDir()
+	write := func(extra string) string {
+		p := filepath.Join(dir, "s.json")
+		os.WriteFile(p, []byte(`{"domain":"x.test"`+extra+`}`), 0o600)
+		return p
+	}
+	cfg, err := loadServerConfig(write(""))
+	if err != nil || cfg.MaxConnsPerTunnel != defaultMaxConnsPerTunnel {
+		t.Fatalf("default: %v, %v", cfg, err)
+	}
+	if _, err := loadServerConfig(write(`,"max_conns_per_tunnel":-1`)); err == nil {
+		t.Fatal("negative limit accepted")
 	}
 }

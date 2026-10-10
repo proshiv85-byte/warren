@@ -5,10 +5,6 @@ section.
 
 ## Hardening
 
-- **Connection limits.** Nothing caps concurrent visitor connections per
-  tunnel, pending streams per session, or unauthenticated connections on the
-  control port. A flood against one tunnel makes both the server and client
-  spawn unbounded goroutines and dials.
 - **Store token hashes** (`sha256(token)`) in `server.json` instead of the
   tokens themselves, so a leaked config or backup doesn't hand out working
   logins. Needs a migration for existing configs.
