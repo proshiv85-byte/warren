@@ -33,6 +33,7 @@ needs **no port forwarding on their router**.
 
 - **[Minecraft mod](minecraft/README.md)**: share a singleplayer "Open to LAN"
   world with `/warren open` (Fabric 1.21.11; friends don't need the mod)
+- **[Roadmap](docs/ROADMAP.md)**: planned improvements
 
 ## Quick look
 

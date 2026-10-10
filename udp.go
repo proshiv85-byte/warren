@@ -81,6 +81,8 @@ func (s *session) runUDPFlow(pc *net.UDPConn, raddr *net.UDPAddr, f *udpFlow) {
 	for {
 		select {
 		case p := <-f.ch:
+			// A stalled client must not pin this flow forever.
+			st.SetWriteDeadline(time.Now().Add(streamTimeout))
 			if writeFrame(st, p) != nil {
 				return
 			}

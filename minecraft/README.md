@@ -16,7 +16,10 @@ Minecraft 1.21.11.
    - paste your whole `warren login --server … --token … --tls` command into
      the **Server address** box, which fills in everything at once, **or**
    - type the server address and token, and tick **Use TLS** if your login
-     command has `--tls`.
+     command has `--tls`. If it also has `--fingerprint` (servers with a
+     self-signed certificate), paste the whole command instead so the
+     fingerprint is saved too, or add `"fingerprint": "sha256:…"` to
+     `warren.json`.
    - **Public port**: the port friends connect to. Leave it empty for any free port.
 
    The settings are saved in `.minecraft/config/warren.json`. If you already ran
@@ -47,7 +50,7 @@ to the console and level-4 operators.
 
 ## Building
 
-Requires JDK 21+.
+Requires JDK 25+ to run Gradle (Fabric Loom needs it); the mod itself targets Java 21.
 
 ```sh
 ./gradlew build    # build/libs/warren-0.1.0.jar

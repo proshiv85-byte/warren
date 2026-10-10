@@ -2,13 +2,17 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 )
 
@@ -85,6 +89,25 @@ func randHex(n int) string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// certFingerprint identifies a certificate by the SHA-256 of its public key,
+// so it stays the same when the certificate is re-issued with the same key.
+func certFingerprint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// normalizeFingerprint accepts "sha256:ab12...", plain hex, or hex with
+// colons, and returns the "sha256:<64 lowercase hex>" form.
+func normalizeFingerprint(fp string) (string, error) {
+	h := strings.ToLower(strings.TrimSpace(fp))
+	h = strings.TrimPrefix(h, "sha256:")
+	h = strings.ReplaceAll(h, ":", "")
+	if b, err := hex.DecodeString(h); err != nil || len(b) != sha256.Size {
+		return "", fmt.Errorf("invalid fingerprint %q (expected sha256: followed by 64 hex digits)", fp)
+	}
+	return "sha256:" + h, nil
 }
 
 type closeWriter interface{ CloseWrite() error }

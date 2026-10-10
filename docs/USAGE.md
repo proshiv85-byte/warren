@@ -296,6 +296,8 @@ version once from the releases page, and use `warren update` from then on.
 | `no server/token configured` | Run the `warren login ...` command first. |
 | `invalid token` | Check you copied the whole token. Ask the server owner if your access was removed. |
 | `EOF (if the server uses TLS, add --tls)` | Run the login command again with `--tls` at the end. |
+| `the server's certificate doesn't match --fingerprint` | The server's certificate changed. Ask the server owner for the new login command (or the output of `warren fingerprint`). If they didn't change anything, someone may be intercepting your connection. |
+| `flag provided but not defined: -fingerprint` | Your warren is too old for this login command. Run `warren update`. |
 | `connection timed out` / `connection refused` | The warren server is down or unreachable. Ask the server owner. |
 | `tcp/25565 is already in use by someone else` | Another person is using that public port. Pick another `--port`. |
 | `port N is outside the allowed range` | The server owner limited which ports can be used. Try one in the range shown. |

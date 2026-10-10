@@ -22,6 +22,8 @@ final class WarrenConfig {
 	String token = "";
 	boolean tls;
 	boolean insecure;
+	/** Pinned server key ("sha256:<hex>") for self-signed certificates; see "warren fingerprint". */
+	String fingerprint = "";
 	/** Public port to ask the server for; 0 means any free port. */
 	int port;
 
@@ -66,6 +68,7 @@ final class WarrenConfig {
 				if (cfg.server.isBlank() && cfg.token.isBlank()) {
 					cfg.tls = login.tls;
 					cfg.insecure = login.insecure;
+					cfg.fingerprint = login.fingerprint;
 				}
 				if (cfg.server.isBlank()) cfg.server = login.server;
 				if (cfg.token.isBlank()) cfg.token = login.token;
@@ -77,6 +80,7 @@ final class WarrenConfig {
 		if (cfg.token.isBlank() && env != null) cfg.token = env;
 		cfg.server = cfg.server.trim();
 		cfg.token = cfg.token.trim();
+		cfg.fingerprint = cfg.fingerprint.trim();
 		return cfg;
 	}
 
@@ -89,6 +93,7 @@ final class WarrenConfig {
 			if (cfg != null) {
 				if (cfg.server == null) cfg.server = "";
 				if (cfg.token == null) cfg.token = "";
+				if (cfg.fingerprint == null) cfg.fingerprint = "";
 			}
 			return cfg;
 		} catch (JsonParseException e) {
@@ -155,6 +160,26 @@ final class WarrenConfig {
 		if (port < 0 || port > 65535) {
 			return "port in warren.json must be between 0 and 65535";
 		}
+		if (!fingerprint.isEmpty() && pinnedKeyHash() == null) {
+			return "bad fingerprint \"" + fingerprint + "\" (expected sha256: followed by 64 hex digits)";
+		}
 		return null;
+	}
+
+	/**
+	 * The pinned SHA-256 of the server's public key, or null if none is set
+	 * or it's malformed. Accepts the same forms as the Go client:
+	 * "sha256:ab12…", plain hex, or hex with colons.
+	 */
+	byte[] pinnedKeyHash() {
+		String h = fingerprint.trim().toLowerCase();
+		if (h.startsWith("sha256:")) {
+			h = h.substring("sha256:".length());
+		}
+		h = h.replace(":", "");
+		if (!h.matches("[0-9a-f]{64}")) {
+			return null;
+		}
+		return java.util.HexFormat.of().parseHex(h);
 	}
 }
