@@ -121,12 +121,17 @@ func startClient(t *testing.T, server, proto, local string, port int, sub string
 // hello opens a raw control connection and returns it with the server's reply.
 func hello(t *testing.T, server string, m Msg) (net.Conn, Msg) {
 	t.Helper()
+	return helloToken(t, server, testToken, m)
+}
+
+func helloToken(t *testing.T, server, token string, m Msg) (net.Conn, Msg) {
+	t.Helper()
 	c, err := net.Dial("tcp", server)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
-	m.Type, m.Version, m.Token = "hello", protoVersion, testToken
+	m.Type, m.Version, m.Token = "hello", protoVersion, token
 	if err := writeMsg(c, m); err != nil {
 		t.Fatal(err)
 	}
@@ -725,10 +730,153 @@ func TestMaxConnsPerTunnelConfig(t *testing.T) {
 		return p
 	}
 	cfg, err := loadServerConfig(write(""))
-	if err != nil || cfg.MaxConnsPerTunnel != defaultMaxConnsPerTunnel {
-		t.Fatalf("default: %v, %v", cfg, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := newServer("", cfg).limits.connsPerTunnel; got != defaultMaxConnsPerTunnel {
+		t.Fatalf("default limit = %d", got)
+	}
+	// The default isn't written back into the file on save.
+	p := filepath.Join(dir, "saved.json")
+	if err := saveServerConfig(p, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); strings.Contains(string(b), "max_conns_per_tunnel") {
+		t.Fatalf("default limit saved into the config:\n%s", b)
 	}
 	if _, err := loadServerConfig(write(`,"max_conns_per_tunnel":-1`)); err == nil {
 		t.Fatal("negative limit accepted")
+	}
+}
+
+// serveConfigFile runs a server on an existing config file, as it is on
+// disk (startServer writes its own).
+func serveConfigFile(t *testing.T, path string) (string, *Server) {
+	t.Helper()
+	cfg, err := loadServerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newServer(path, cfg)
+	go srv.run()
+	waitDial(t, "tcp", cfg.Listen)
+	return cfg.Listen, srv
+}
+
+func TestAddUserStoresOnlyHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.json")
+	listen := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	os.WriteFile(path, []byte(`{"listen":"`+listen+`","domain":"tunnel.test","users":[]}`), 0o600)
+
+	// Capture what adduser prints, which is the only place the token appears.
+	r, w, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = w
+	err := cmdAddUser([]string{"--config", path, "bob"})
+	os.Stdout = stdout
+	w.Close()
+	out, _ := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := strings.Fields(string(out[strings.Index(string(out), "--token"):]))
+	token := f[1]
+
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), token) {
+		t.Fatalf("plain token stored in the config:\n%s", b)
+	}
+	if !strings.Contains(string(b), hashToken(token)) {
+		t.Fatalf("token hash missing from the config:\n%s", b)
+	}
+
+	server, _ := serveConfigFile(t, path)
+	if _, m := helloToken(t, server, token, Msg{Proto: "tcp"}); m.Type != "ok" {
+		t.Fatalf("login with the new token: %+v", m)
+	}
+	if _, m := helloToken(t, server, hashToken(token), Msg{Proto: "tcp"}); m.Type != "error" {
+		t.Fatalf("the hash itself worked as a token: %+v", m)
+	}
+}
+
+// A config from before 0.5.0 keeps working, and the server swaps its plain
+// tokens for hashes.
+func TestPlainTokenMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.json")
+	listen := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	legacy := `{"listen":"` + listen + `","domain":"tunnel.test","port_min":1024,"port_max":65535,
+		"users":[{"name":"old","token":"old-plain-token","max_tunnels":2}]}`
+	os.WriteFile(path, []byte(legacy), 0o600)
+
+	cfg, err := loadServerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrateTokens(path, cfg)
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "old-plain-token") || !strings.Contains(string(b), hashToken("old-plain-token")) {
+		t.Fatalf("not migrated:\n%s", b)
+	}
+	after, err := loadServerConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := after.Users[0]; u.Name != "old" || u.MaxTunnels != 2 || u.Token != "" {
+		t.Fatalf("user changed by the migration: %+v", u)
+	}
+
+	server, _ := serveConfigFile(t, path)
+	if _, m := helloToken(t, server, "old-plain-token", Msg{Proto: "tcp"}); m.Type != "ok" {
+		t.Fatalf("old token after migration: %+v", m)
+	}
+}
+
+// Even without migrating (say the config is read-only), plain tokens work.
+func TestPlainTokenWithoutMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.json")
+	listen := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	os.WriteFile(path, []byte(`{"listen":"`+listen+`","domain":"tunnel.test",
+		"users":[{"name":"old","token":"old-plain-token"}]}`), 0o600)
+	server, _ := serveConfigFile(t, path)
+	if _, m := helloToken(t, server, "old-plain-token", Msg{Proto: "tcp"}); m.Type != "ok" {
+		t.Fatalf("plain token: %+v", m)
+	}
+	if _, m := helloToken(t, server, "wrong", Msg{Proto: "tcp"}); m.Type != "error" {
+		t.Fatalf("wrong token: %+v", m)
+	}
+}
+
+func TestDelUserDisconnects(t *testing.T) {
+	var srv *Server
+	server, _ := startServerWith(t, nil, func(s *Server) { srv = s })
+	ctrl, m := hello(t, server, Msg{Proto: "tcp"})
+	if m.Type != "ok" {
+		t.Fatalf("%+v", m)
+	}
+	if err := cmdDelUser([]string{"--config", srv.cfgPath, "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	srv.reloadUsers() // what the 30-second timer does
+	br := bufio.NewReader(ctrl)
+	for {
+		ctrl.SetReadDeadline(time.Now().Add(5 * time.Second))
+		m, err := readMsg(br)
+		if err != nil {
+			t.Fatalf("no revocation message: %v", err)
+		}
+		if m.Type == "error" {
+			if !m.Fatal || !strings.Contains(m.Error, "revoked") {
+				t.Fatalf("got %+v", m)
+			}
+			return
+		}
+	}
+}
+
+func TestInvalidTokenHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.json")
+	os.WriteFile(path, []byte(`{"domain":"x.test","users":[{"name":"a","token_hash":"sha256:nope"}]}`), 0o600)
+	if _, err := loadServerConfig(path); err == nil || !strings.Contains(err.Error(), `"a"`) {
+		t.Fatalf("got %v", err)
 	}
 }

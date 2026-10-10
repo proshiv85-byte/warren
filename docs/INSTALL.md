@@ -127,7 +127,7 @@ sudo mv ~/warren-linux-amd64 /usr/local/bin/warren
 sudo chmod +x /usr/local/bin/warren
 sudo mv ~/warren.service /etc/systemd/system/warren.service
 sudo chown root:root /usr/local/bin/warren /etc/systemd/system/warren.service
-warren version            # should print: warren 0.4.0
+warren version            # should print: warren 0.5.0
 ```
 
 > **All remaining VPS commands in this guide need root.** Either put `sudo`
@@ -180,7 +180,8 @@ What each line means:
   page) and the log says so. Restart warren after changing it.
 - **`users`**: leave it empty. The `warren adduser` command fills it in.
 
-Lock it down so only warren can read it, because it will contain everyone's tokens:
+Lock it down so only warren can read it. It only stores hashes of everyone's
+tokens, but there's no reason for anyone else to read it:
 
 ```sh
 chown -R warren:warren /etc/warren
@@ -241,7 +242,7 @@ journalctl -u warren -f
 which should show something like:
 
 ```
-warren 0.4.0: control port :7000 (tls=false), domain tunnel.example.com, ports 1024-65535, 0 users
+warren 0.5.0: control port :7000 (tls=false), domain tunnel.example.com, ports 1024-65535, 0 users
 http tunnels on :80
 ```
 
@@ -407,6 +408,8 @@ sudo -u warren warren deluser alice              # revoke access
 - Deleted users are disconnected within 30 seconds.
 - Send tokens privately (a DM, not a public channel). A token works like a
   password.
+- warren only stores a hash of each token, so `adduser` shows it just once.
+  If someone loses theirs, `deluser` and `adduser` them again.
 - If a token leaks, `deluser` and `adduser` the person again to issue a new
   one.
 
