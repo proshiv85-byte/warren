@@ -50,7 +50,7 @@ to the console and level-4 operators.
 
 ## Building
 
-Requires JDK 21+.
+Requires JDK 25+ to run Gradle (Fabric Loom needs it); the mod itself targets Java 21.
 
 ```sh
 ./gradlew build    # build/libs/warren-0.1.0.jar
