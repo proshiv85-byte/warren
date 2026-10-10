@@ -62,7 +62,7 @@ warren update                             # update to the latest release
 | `https_addr`, `https_cert`, `https_key` | HTTPS for website tunnels; the cert must cover `*.domain` |
 | `public_http_port` | Port shown in website URLs when a reverse proxy sits in front |
 | `tls_cert`, `tls_key` | Encrypt client↔server traffic, including tokens (recommended) |
-| `users` | Managed by `adduser` / `deluser` |
+| `users` | Managed by `adduser` / `deluser`. Stores token hashes, not tokens |
 
 Admin commands read `/etc/warren/server.json` by default. Override it with
 `--config FILE` or `WARREN_CONFIG`.

@@ -5,9 +5,6 @@ section.
 
 ## Hardening
 
-- **Store token hashes** (`sha256(token)`) in `server.json` instead of the
-  tokens themselves, so a leaked config or backup doesn't hand out working
-  logins. Needs a migration for existing configs.
 - **Sign releases** (GitHub artifact attestations, cosign or minisign) and
   verify the signature in `warren update` and `setup.sh`. `SHA256SUMS` from
   the same release catches corruption but not a compromised release.

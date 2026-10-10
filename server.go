@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -30,9 +32,43 @@ const (
 )
 
 type UserConfig struct {
-	Name       string `json:"name"`
-	Token      string `json:"token"`
+	Name string `json:"name"`
+	// SHA-256 of the user's token ("sha256:<hex>"). The token itself is only
+	// shown once, by adduser, so a leaked config doesn't leak logins.
+	TokenHash string `json:"token_hash,omitempty"`
+	// The plain token, in configs from before 0.5.0. Still accepted; the
+	// server and adduser/deluser replace it with token_hash when they save.
+	Token      string `json:"token,omitempty"`
 	MaxTunnels int    `json:"max_tunnels,omitempty"` // 0 = unlimited
+}
+
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// tokenHash is the hash to check logins against, from either field.
+func (u UserConfig) tokenHash() string {
+	if u.TokenHash != "" {
+		return u.TokenHash
+	}
+	if u.Token != "" {
+		return hashToken(u.Token)
+	}
+	return ""
+}
+
+// hashTokens replaces plain tokens with their hashes and returns how many
+// it replaced.
+func hashTokens(cfg *ServerConfig) int {
+	n := 0
+	for i := range cfg.Users {
+		if u := &cfg.Users[i]; u.Token != "" {
+			u.TokenHash, u.Token = u.tokenHash(), ""
+			n++
+		}
+	}
+	return n
 }
 
 type ServerConfig struct {
@@ -81,8 +117,17 @@ func loadServerConfig(path string) (*ServerConfig, error) {
 	if cfg.MaxConnsPerTunnel < 0 {
 		return nil, fmt.Errorf("%s: max_conns_per_tunnel can't be negative", path)
 	}
-	if cfg.MaxConnsPerTunnel == 0 {
-		cfg.MaxConnsPerTunnel = defaultMaxConnsPerTunnel
+	for i := range cfg.Users {
+		u := &cfg.Users[i]
+		if u.TokenHash == "" {
+			continue
+		}
+		// Same "sha256:<64 hex>" form as TLS fingerprints.
+		h, err := normalizeFingerprint(u.TokenHash)
+		if err != nil {
+			return nil, fmt.Errorf("%s: user %q: invalid token_hash", path, u.Name)
+		}
+		u.TokenHash = h
 	}
 	return cfg, nil
 }
@@ -95,6 +140,7 @@ func defaultConfigPath() string {
 }
 
 func saveServerConfig(path string, cfg *ServerConfig) error {
+	hashTokens(cfg) // never write a plain token back
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -126,10 +172,10 @@ type Server struct {
 }
 
 type session struct {
-	srv   *Server
-	user  string
-	token string
-	ctrl  net.Conn
+	srv       *Server
+	user      string
+	tokenHash string
+	ctrl      net.Conn
 
 	wmu       sync.Mutex
 	closed    chan struct{}
@@ -150,15 +196,41 @@ func cmdServer(args []string) error {
 	if err != nil {
 		return err
 	}
+	migrateTokens(*cfgPath, cfg)
 	return newServer(*cfgPath, cfg).run()
 }
 
+// migrateTokens rewrites a config from before 0.5.0 so it stores token
+// hashes instead of tokens. Logins keep working either way, so a failure
+// (a read-only config, say) is only logged.
+func migrateTokens(path string, cfg *ServerConfig) {
+	plain := *cfg
+	plain.Users = append([]UserConfig(nil), cfg.Users...)
+	n := hashTokens(&plain)
+	if n == 0 {
+		return
+	}
+	if err := saveServerConfig(path, &plain); err != nil {
+		log.Printf("could not replace the %d plain token(s) in %s with hashes: %v", n, path, err)
+		return
+	}
+	log.Printf("replaced the %d plain token(s) in %s with hashes; the tokens themselves keep working", n, path)
+	// setup.sh keeps a copy of the previous config, which still has them.
+	if _, err := os.Stat(path + ".bak"); err == nil {
+		log.Printf("%s.bak may still contain plain tokens; delete it if you don't need it", path)
+	}
+}
+
 func newServer(cfgPath string, cfg *ServerConfig) *Server {
+	connsPerTunnel := cfg.MaxConnsPerTunnel
+	if connsPerTunnel == 0 {
+		connsPerTunnel = defaultMaxConnsPerTunnel
+	}
 	return &Server{
 		cfgPath: cfgPath,
 		cfg:     cfg,
 		limits: limits{
-			connsPerTunnel: cfg.MaxConnsPerTunnel,
+			connsPerTunnel: connsPerTunnel,
 			pendingStreams: defaultMaxPendingStreams,
 			handshakesIP:   defaultMaxHandshakesIP,
 			handshakes:     defaultMaxHandshakes,
@@ -298,11 +370,12 @@ func (srv *Server) authenticate(token string) *UserConfig {
 		srv.users = cfg.Users
 		srv.mu.Unlock()
 	}
+	h := hashToken(token)
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
 	for i := range srv.users {
 		u := srv.users[i]
-		if u.Token != "" && subtle.ConstantTimeCompare([]byte(u.Token), []byte(token)) == 1 {
+		if uh := u.tokenHash(); uh != "" && subtle.ConstantTimeCompare([]byte(uh), []byte(h)) == 1 {
 			return &u
 		}
 	}
@@ -313,28 +386,32 @@ func (srv *Server) authenticate(token string) *UserConfig {
 // whose user was removed.
 func (srv *Server) watchUsers() {
 	for range time.Tick(30 * time.Second) {
-		cfg, err := loadServerConfig(srv.cfgPath)
-		if err != nil {
-			log.Printf("reloading config: %v", err)
-			continue
+		srv.reloadUsers()
+	}
+}
+
+func (srv *Server) reloadUsers() {
+	cfg, err := loadServerConfig(srv.cfgPath)
+	if err != nil {
+		log.Printf("reloading config: %v", err)
+		return
+	}
+	valid := map[string]bool{}
+	for _, u := range cfg.Users {
+		valid[u.tokenHash()] = true
+	}
+	var kick []*session
+	srv.mu.Lock()
+	srv.users = cfg.Users
+	for s := range srv.sessions {
+		if !valid[s.tokenHash] {
+			kick = append(kick, s)
 		}
-		valid := map[string]bool{}
-		for _, u := range cfg.Users {
-			valid[u.Token] = true
-		}
-		var kick []*session
-		srv.mu.Lock()
-		srv.users = cfg.Users
-		for s := range srv.sessions {
-			if !valid[s.token] {
-				kick = append(kick, s)
-			}
-		}
-		srv.mu.Unlock()
-		for _, s := range kick {
-			log.Printf("[%s] user removed, disconnecting", s.user)
-			s.kick("your access was revoked")
-		}
+	}
+	srv.mu.Unlock()
+	for _, s := range kick {
+		log.Printf("[%s] user removed, disconnecting", s.user)
+		s.kick("your access was revoked")
 	}
 }
 
@@ -356,7 +433,7 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 		fail(true, "invalid token")
 		return
 	}
-	s.user, s.token = user.Name, user.Token
+	s.user, s.tokenHash = user.Name, user.tokenHash()
 
 	// Claim first: a reconnecting client asks for its old port/subdomain,
 	// which kicks its own stale session, so that one isn't counted below.
@@ -686,7 +763,7 @@ func cmdAddUser(args []string) error {
 		}
 	}
 	token := randHex(24)
-	cfg.Users = append(cfg.Users, UserConfig{Name: pos[0], Token: token, MaxTunnels: *maxTunnels})
+	cfg.Users = append(cfg.Users, UserConfig{Name: pos[0], TokenHash: hashToken(token), MaxTunnels: *maxTunnels})
 	if err := saveServerConfig(*cfgPath, cfg); err != nil {
 		return err
 	}
@@ -702,6 +779,7 @@ func cmdAddUser(args []string) error {
 		}
 	}
 	fmt.Printf("Added user %q. Send them this command:\n\n  %s\n\n", pos[0], login)
+	fmt.Println("Only a hash of the token is stored, so this is the only time it's shown.")
 	return nil
 }
 

@@ -180,7 +180,8 @@ What each line means:
   page) and the log says so. Restart warren after changing it.
 - **`users`**: leave it empty. The `warren adduser` command fills it in.
 
-Lock it down so only warren can read it, because it will contain everyone's tokens:
+Lock it down so only warren can read it. It only stores hashes of everyone's
+tokens, but there's no reason for anyone else to read it:
 
 ```sh
 chown -R warren:warren /etc/warren
@@ -407,6 +408,8 @@ sudo -u warren warren deluser alice              # revoke access
 - Deleted users are disconnected within 30 seconds.
 - Send tokens privately (a DM, not a public channel). A token works like a
   password.
+- warren only stores a hash of each token, so `adduser` shows it just once.
+  If someone loses theirs, `deluser` and `adduser` them again.
 - If a token leaks, `deluser` and `adduser` the person again to issue a new
   one.
 
