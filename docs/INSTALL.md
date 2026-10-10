@@ -127,7 +127,7 @@ sudo mv ~/warren-linux-amd64 /usr/local/bin/warren
 sudo chmod +x /usr/local/bin/warren
 sudo mv ~/warren.service /etc/systemd/system/warren.service
 sudo chown root:root /usr/local/bin/warren /etc/systemd/system/warren.service
-warren version            # should print: warren 0.4.0
+warren version            # should print: warren 0.5.0
 ```
 
 > **All remaining VPS commands in this guide need root.** Either put `sudo`
@@ -242,7 +242,7 @@ journalctl -u warren -f
 which should show something like:
 
 ```
-warren 0.4.0: control port :7000 (tls=false), domain tunnel.example.com, ports 1024-65535, 0 users
+warren 0.5.0: control port :7000 (tls=false), domain tunnel.example.com, ports 1024-65535, 0 users
 http tunnels on :80
 ```
 
