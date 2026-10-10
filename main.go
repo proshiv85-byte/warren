@@ -7,7 +7,8 @@ import (
 	"os"
 )
 
-const version = "0.2.0"
+// version is a var so builds can override it: -ldflags "-X main.version=..."
+var version = "0.2.0"
 
 const usageText = `warren - self-hosted tunnels (TCP, UDP, HTTP)
 
@@ -33,6 +34,8 @@ Server (config: --config FILE, $WARREN_CONFIG, or /etc/warren/server.json):
   warren deluser NAME              remove a user
   warren users                     list users
 
+  warren update                    update warren to the latest release
+  warren update --check            only check whether there's a newer version
   warren version
 `
 
@@ -42,6 +45,7 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
+	removeOldExecutable()
 
 	var err error
 	if cmd == "tcp" || cmd == "udp" || cmd == "http" || cmd == "server" {
@@ -70,6 +74,8 @@ func main() {
 		err = cmdDelUser(args)
 	case "users":
 		err = cmdUsers(args)
+	case "update":
+		err = cmdUpdate(args)
 	case "version", "--version":
 		fmt.Println("warren", version)
 	case "help", "-h", "--help":

@@ -42,6 +42,7 @@ warren tcp 25565 --port 25565             # Minecraft Java
 warren udp 19132 --port 19132             # Minecraft Bedrock
 warren http 3000 --subdomain alice        # https://alice.tunnel.example.com
 warren tcp 25565 -b                       # in the background (warren ps, warren stop)
+warren update                             # update to the latest release
 ```
 
 ## Server config reference (`/etc/warren/server.json`)

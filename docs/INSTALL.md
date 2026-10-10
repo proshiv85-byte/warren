@@ -400,7 +400,20 @@ sudo -u warren warren deluser alice              # revoke access
 
 ## Updating warren
 
-On your computer, pull/edit the code and run `make dist`. Then:
+On the VPS:
+
+```sh
+sudo warren update
+```
+
+This downloads the latest release from GitHub, checks it against the
+release's checksums, replaces `/usr/local/bin/warren` and restarts the
+service. `warren update --check` only tells you whether there's a new version.
+
+(Versions before 0.3.0 don't have `warren update` yet. Update those once with
+`setup.sh`, or as below.)
+
+To install a build of your own instead, run `make dist` on your computer, then:
 
 ```sh
 scp dist/warren-linux-amd64 ubuntu@203.0.113.10:~/warren.new

@@ -272,6 +272,23 @@ journalctl --user -u warren-mc -f   # view the log
 
 ---
 
+## Updating
+
+```sh
+warren update            # download and install the latest version
+warren update --check    # only check whether there's a new one
+```
+
+On Linux and Mac, if warren is in `/usr/local/bin`, use `sudo warren update`.
+On Windows, if warren is in a protected folder like `C:\Program Files`, run
+PowerShell as administrator. Tunnels started with `-b` keep running the old
+version until you restart them (`warren stop`, then start them again).
+
+warren versions before 0.3.0 don't have this command yet. Download the new
+version once from the releases page, and use `warren update` from then on.
+
+---
+
 ## Troubleshooting
 
 | Message | What to do |
@@ -301,5 +318,6 @@ warren http PORT [--subdomain NAME]
 warren tcp  PORT -b                                     # run in the background
 warren ps                                               # list background tunnels
 warren stop PID|all                                     # stop them
+warren update                                           # update to the latest version
 warren tcp -h                                           # all options
 ```

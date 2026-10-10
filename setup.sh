@@ -979,7 +979,12 @@ main() {
 			"Quit"
 		case $REPLY in
 			1)
-				[[ -n ${NEW_BIN:-} ]] || die "no new warren binary found to install"
+				if [[ -z ${NEW_BIN:-} ]]; then
+					# No binary next to this script: download the latest release.
+					"$BIN_PATH" update ||
+						die "\"warren update\" failed. Put a new warren-linux-* binary next to setup.sh and try again"
+					exit 0
+				fi
 				install_binary
 				write_unit
 				systemctl restart warren
