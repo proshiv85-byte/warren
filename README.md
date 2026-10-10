@@ -84,6 +84,17 @@ make build   # ./warren for this machine
 make dist    # dist/ for linux, windows, mac (amd64 + arm64)
 ```
 
+## Releasing
+
+1. Raise `version` in `main.go` (and `mod_version` in
+   `minecraft/gradle.properties` if the mod changed), and write the notes in
+   `.github/release-notes/vX.Y.Z.md`. Merge that to `main`.
+2. On GitHub: **Actions → Release → Run workflow** (branch `main`). It tests
+   and builds everything, then creates a **draft** release with all the
+   files and `SHA256SUMS`.
+3. Open **Releases**, check the draft, and press **Publish release**. Only
+   then do `warren update` and `setup.sh` see it.
+
 ## License
 
 MIT

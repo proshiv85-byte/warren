@@ -38,3 +38,7 @@ jobs:
           java-version: 25
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew build --no-daemon
+      - name: Check the jar has the name the release workflow expects
+        run: |
+          ls build/libs
+          test -f "build/libs/warren-$(sed -n 's/^mod_version=//p' gradle.properties).jar"
