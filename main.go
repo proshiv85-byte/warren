@@ -22,6 +22,11 @@ Client:
   LOCAL is a port (25565) or host:port (192.168.1.5:25565).
   Run "warren tcp -h" for all flags.
 
+Background (works with tcp, udp, http and server):
+  warren tcp 25565 -b              run in the background; the terminal can be closed
+  warren ps                        list warren processes running in the background
+  warren stop PID|all              stop one (or all) of them
+
 Server (config: --config FILE, $WARREN_CONFIG, or /etc/warren/server.json):
   warren server                    run the tunnel server
   warren adduser NAME              create a user and print their login command
@@ -39,9 +44,22 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 
 	var err error
+	if cmd == "tcp" || cmd == "udp" || cmd == "http" || cmd == "server" {
+		if rest, bg := takeBackgroundFlag(args); bg {
+			if err := startBackground(append([]string{cmd}, rest...)); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
 	switch cmd {
 	case "tcp", "udp", "http":
 		err = cmdTunnel(cmd, args)
+	case "ps":
+		err = cmdPs(args)
+	case "stop":
+		err = cmdStop(args)
 	case "login":
 		err = cmdLogin(args)
 	case "server":

@@ -91,7 +91,8 @@ warren <type> <local port> [options]
 - **local port**: the port the server or app on your computer uses.
 
 Leave the window open while you want the tunnel to be online. Press `Ctrl+C`
-to stop.
+to stop. Or add `-b` to run it in the background and close the window (see
+[Keeping it running in the background](#keeping-it-running-in-the-background-optional)).
 
 ### Minecraft Java Edition
 
@@ -219,10 +220,37 @@ Vanilla Minecraft, Spigot, and Bedrock don't support this.
 
 ## Keeping it running in the background (optional)
 
-**Windows:** the simplest way is to leave the PowerShell window open
-(minimized). Closing the window stops the tunnel.
+Add `-b` to any tunnel command. warren waits until the tunnel is online,
+prints the address, and then runs on its own, so you can close the window:
 
-**Linux:** create `~/.config/systemd/user/warren-mc.service`:
+```sh
+warren tcp 25565 --port 25565 -b
+```
+
+```
+  warren is online
+
+  tcp://tunnel.example.com:25565  ->  127.0.0.1:25565
+
+  people connect to: tunnel.example.com:25565
+
+  running in the background (pid 4182)
+  log:   /home/you/.config/warren/background/20261010-110405-tcp-25565.log
+  stop:  warren stop 4182    list: warren ps
+```
+
+```sh
+warren ps            # list background tunnels and their addresses
+warren stop 4182     # stop one (use the PID from warren ps)
+warren stop all      # stop all of them
+```
+
+If something is wrong (bad token, port taken…), `-b` shows the error right
+away instead of hiding it in the background. It works the same on Windows,
+Mac and Linux. A background tunnel stops when you shut down or log out.
+
+**To start it automatically at boot on Linux**, use a systemd user service
+instead. Create `~/.config/systemd/user/warren-mc.service`:
 
 ```ini
 [Unit]
@@ -241,9 +269,6 @@ systemctl --user enable --now warren-mc
 loginctl enable-linger $USER     # keep running when you're logged out
 journalctl --user -u warren-mc -f   # view the log
 ```
-
-**Mac:** run it inside `tmux` or `screen`, or just keep the Terminal window
-open.
 
 ---
 
@@ -273,5 +298,8 @@ warren login --server HOST:7000 --token TOKEN [--tls]   # once
 warren tcp  PORT [--port PUBLIC_PORT] [--proxy-protocol]
 warren udp  PORT [--port PUBLIC_PORT]
 warren http PORT [--subdomain NAME]
+warren tcp  PORT -b                                     # run in the background
+warren ps                                               # list background tunnels
+warren stop PID|all                                     # stop them
 warren tcp -h                                           # all options
 ```
