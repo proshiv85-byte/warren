@@ -173,6 +173,11 @@ What each line means:
   game servers. With `1024`, people can grab the standard Minecraft ports
   (`25565`, `19132`). Ports already used by other programs on the VPS are
   skipped automatically.
+- **`max_conns_per_tunnel`** (optional, not in the example): how many
+  visitors one tunnel may have connected at once. The default, `1000`, is
+  plenty for game servers and small sites; raise it for a busy website.
+  Beyond the limit, new visitors are turned away (websites get a "too busy"
+  page) and the log says so. Restart warren after changing it.
 - **`users`**: leave it empty. The `warren adduser` command fills it in.
 
 Lock it down so only warren can read it, because it will contain everyone's tokens:

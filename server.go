@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,12 +44,14 @@ type ServerConfig struct {
 	HTTPSAddr string `json:"https_addr,omitempty"`
 	// Port shown in printed website URLs, when a reverse proxy in front of
 	// warren serves them on a different port than http_addr/https_addr.
-	PublicHTTPPort int          `json:"public_http_port,omitempty"`
-	HTTPSCert      string       `json:"https_cert,omitempty"` // must cover *.domain
-	HTTPSKey       string       `json:"https_key,omitempty"`
-	PortMin        int          `json:"port_min"`
-	PortMax        int          `json:"port_max"`
-	Users          []UserConfig `json:"users"`
+	PublicHTTPPort int    `json:"public_http_port,omitempty"`
+	HTTPSCert      string `json:"https_cert,omitempty"` // must cover *.domain
+	HTTPSKey       string `json:"https_key,omitempty"`
+	PortMin        int    `json:"port_min"`
+	PortMax        int    `json:"port_max"`
+	// Visitors one tunnel may have connected at once (0 = 1000).
+	MaxConnsPerTunnel int          `json:"max_conns_per_tunnel,omitempty"`
+	Users             []UserConfig `json:"users"`
 }
 
 func loadServerConfig(path string) (*ServerConfig, error) {
@@ -74,6 +77,12 @@ func loadServerConfig(path string) (*ServerConfig, error) {
 	}
 	if cfg.PortMin < 1 || cfg.PortMax > 65535 || cfg.PortMin > cfg.PortMax {
 		return nil, fmt.Errorf("%s: invalid port_min/port_max", path)
+	}
+	if cfg.MaxConnsPerTunnel < 0 {
+		return nil, fmt.Errorf("%s: max_conns_per_tunnel can't be negative", path)
+	}
+	if cfg.MaxConnsPerTunnel == 0 {
+		cfg.MaxConnsPerTunnel = defaultMaxConnsPerTunnel
 	}
 	return cfg, nil
 }
@@ -106,6 +115,8 @@ type Server struct {
 	cfgPath string
 	cfg     *ServerConfig
 	httpOn  bool
+	limits  limits
+	hs      handshakes
 
 	mu       sync.Mutex
 	users    []UserConfig
@@ -123,6 +134,10 @@ type session struct {
 	wmu       sync.Mutex
 	closed    chan struct{}
 	closeOnce sync.Once
+
+	conns    atomic.Int32 // connected visitors
+	pending  atomic.Int32 // visitors waiting for the client's data connection
+	lastWarn atomic.Int64 // when a limit was last logged (UnixNano)
 }
 
 func cmdServer(args []string) error {
@@ -135,15 +150,24 @@ func cmdServer(args []string) error {
 	if err != nil {
 		return err
 	}
-	srv := &Server{
-		cfgPath:  *cfgPath,
-		cfg:      cfg,
+	return newServer(*cfgPath, cfg).run()
+}
+
+func newServer(cfgPath string, cfg *ServerConfig) *Server {
+	return &Server{
+		cfgPath: cfgPath,
+		cfg:     cfg,
+		limits: limits{
+			connsPerTunnel: cfg.MaxConnsPerTunnel,
+			pendingStreams: defaultMaxPendingStreams,
+			handshakesIP:   defaultMaxHandshakesIP,
+			handshakes:     defaultMaxHandshakes,
+		},
 		users:    cfg.Users,
 		sessions: map[*session]struct{}{},
 		claims:   map[string]*session{},
 		pending:  map[string]chan net.Conn{},
 	}
-	return srv.run()
 }
 
 func (srv *Server) run() error {
@@ -235,8 +259,13 @@ func (cr *certReloader) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 }
 
 func (srv *Server) handleConn(c net.Conn) {
+	if !srv.hs.start(c.RemoteAddr(), srv.limits) {
+		c.Close()
+		return
+	}
 	c.SetReadDeadline(time.Now().Add(10 * time.Second))
 	m, err := readMsg(c)
+	srv.hs.done(c.RemoteAddr())
 	if err != nil {
 		c.Close()
 		return
@@ -537,7 +566,12 @@ func (srv *Server) serveTCP(ln net.Listener, s *session) {
 		if err != nil {
 			return
 		}
+		if !s.reserveConn() {
+			c.Close()
+			continue
+		}
 		go func() {
+			defer s.releaseConn()
 			st, err := s.openStream(c.RemoteAddr().String())
 			if err != nil {
 				c.Close()
@@ -592,6 +626,12 @@ func (s *session) pinger() {
 // and waits for it to arrive.
 func (s *session) openStream(remote string) (net.Conn, error) {
 	srv := s.srv
+	if s.pending.Add(1) > int32(srv.limits.pendingStreams) {
+		s.pending.Add(-1)
+		s.warnLimit("the client isn't keeping up (%d visitors waiting); turning new ones away", srv.limits.pendingStreams)
+		return nil, errors.New("too many visitors waiting")
+	}
+	defer s.pending.Add(-1)
 	id := randHex(16)
 	ch := make(chan net.Conn, 1)
 	srv.mu.Lock()

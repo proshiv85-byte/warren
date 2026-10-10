@@ -62,6 +62,11 @@ func (srv *Server) handleHTTP(c net.Conn) {
 		httpError(c, 404, fmt.Sprintf("warren: tunnel %q is not online", sub))
 		return
 	}
+	if !s.reserveConn() {
+		httpError(c, 503, "warren: this site is too busy right now, try again in a moment")
+		return
+	}
+	defer s.releaseConn()
 	st, err := s.openStream(c.RemoteAddr().String())
 	if err != nil {
 		httpError(c, 502, "warren: tunnel client did not respond")
