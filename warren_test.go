@@ -267,7 +267,7 @@ func TestHTTPRoutingByHost(t *testing.T) {
 		}
 		defer c.Close()
 		c.SetDeadline(time.Now().Add(5 * time.Second))
-		fmt.Fprintf(c, "GET / HTTP/1.1\r\nHost: %s\r\n\r\n", host)
+		fmt.Fprintf(c, "GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host)
 		b, _ := io.ReadAll(c)
 		return string(b)
 	}
@@ -691,7 +691,7 @@ func TestHTTPBusy(t *testing.T) {
 		}
 		defer c.Close()
 		c.SetDeadline(time.Now().Add(5 * time.Second))
-		fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: alice.tunnel.test\r\n\r\n", path)
+		fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: alice.tunnel.test\r\nConnection: close\r\n\r\n", path)
 		b, _ := io.ReadAll(c)
 		return string(b)
 	}

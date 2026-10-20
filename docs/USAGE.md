@@ -157,6 +157,21 @@ one. Use whatever port your app runs on, e.g. `8080`, `5173` (Vite), or `3000`
 > `server.allowedHosts: ['.tunnel.example.com']` in `vite.config.js`. Others
 > have a similar "allowed hosts" setting.
 
+To keep a site private:
+
+```sh
+warren http 3000 --auth me:a-long-password     # visitors must log in
+warren http 3000 --allow 203.0.113.7           # only this IP gets in
+warren http 3000 --allow 203.0.113.0/24,198.51.100.4
+```
+
+The password protects the tunnel, so your app never sees it. If the server
+runs an old warren that can't enforce `--auth` or `--allow`, your warren
+refuses to start rather than leave the site open.
+
+Your app gets the visitor's IP in the `X-Forwarded-For` header, and
+`X-Forwarded-Proto` says whether they used `https`.
+
 ### Other games and programs
 
 Anything that uses TCP or UDP works. You just need to know its port and
@@ -212,6 +227,16 @@ Vanilla Minecraft, Spigot, and Bedrock don't support this.
 ```
 
 - **connection from**: someone joined, with their IP address.
+
+Website tunnels show each request instead:
+
+```
+2026/10/05 20:14:03 GET     200     12ms  81.2.69.160     /index.html
+2026/10/05 20:14:03 GET     404      3ms  81.2.69.160     /favicon.ico
+```
+
+That's the method, the status your app answered, how long it took, the
+visitor's IP and the path.
 - **disconnected / reconnected**: your internet or the server blipped. warren
   reconnects by itself and keeps the same address, so you don't need to do
   anything.
@@ -306,6 +331,7 @@ version once from the releases page, and use `warren update` from then on.
 | Friends get "Connection refused" in Minecraft | Check that your Minecraft server is running and that warren shows `online`. |
 | Website shows `tunnel "x" is not online` | Your warren window for that subdomain isn't running. |
 | Website shows `local service ... is not running` | Your web app isn't running, or it's on a different port. |
+| `this server is too old to protect tunnels with --auth` | Ask the server owner to run `warren update`. Until then, leave out `--auth`/`--allow`. |
 | Players see "Invalid IP / proxy" errors or can't join after enabling PROXY protocol | You enabled it on only one side. See [Seeing real player IPs](#seeing-real-player-ips-optional-minecraft). |
 
 ---
@@ -316,7 +342,7 @@ version once from the releases page, and use `warren update` from then on.
 warren login --server HOST:7000 --token TOKEN [--tls]   # once
 warren tcp  PORT [--port PUBLIC_PORT] [--proxy-protocol]
 warren udp  PORT [--port PUBLIC_PORT]
-warren http PORT [--subdomain NAME]
+warren http PORT [--subdomain NAME] [--auth USER:PASS] [--allow IPS]
 warren tcp  PORT -b                                     # run in the background
 warren ps                                               # list background tunnels
 warren stop PID|all                                     # stop them

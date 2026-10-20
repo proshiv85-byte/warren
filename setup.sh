@@ -604,6 +604,8 @@ write_nginx_site() {
 			say "        proxy_pass http://127.0.0.1:8080;"
 			say "        proxy_http_version 1.1;"
 			say "        proxy_set_header Host \$host;"
+			say "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+			say "        proxy_set_header X-Forwarded-Proto \$scheme;"
 			say "        proxy_set_header Upgrade \$http_upgrade;"
 			say "        proxy_set_header Connection \"upgrade\";"
 			say "    }"
@@ -756,6 +758,8 @@ write_config() {
 	fi
 	[[ -n $WEB && -n $HTTP_ADDR ]] && lines+=("\"http_addr\": \"$HTTP_ADDR\"")
 	[[ -n $WEB && -n $PUBLIC_HTTP_PORT ]] && lines+=("\"public_http_port\": $PUBLIC_HTTP_PORT")
+	# nginx in front: believe the visitor IPs it passes along.
+	[[ -n $WEB && $HTTP_ADDR == 127.0.0.1:* ]] && lines+=("\"trusted_proxies\": [\"127.0.0.1\"]")
 	if [[ -n $WEB && $TLS_MODE == cloudflare ]]; then
 		lines+=("\"https_addr\": \":443\"" "\"https_cert\": \"$TLS_DIR/cert.pem\"" "\"https_key\": \"$TLS_DIR/key.pem\"")
 	fi

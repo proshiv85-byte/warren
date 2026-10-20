@@ -16,6 +16,9 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/netip"
 	"os"
 	"regexp"
 	"slices"
@@ -84,8 +87,14 @@ type ServerConfig struct {
 	PublicHTTPPort int    `json:"public_http_port,omitempty"`
 	HTTPSCert      string `json:"https_cert,omitempty"` // must cover *.domain
 	HTTPSKey       string `json:"https_key,omitempty"`
-	PortMin        int    `json:"port_min"`
-	PortMax        int    `json:"port_max"`
+	// Send plain-HTTP website visitors to the HTTPS URL instead.
+	HTTPSRedirect bool `json:"https_redirect,omitempty"`
+	// Proxies in front of warren whose X-Forwarded-For/-Proto are believed.
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	// Log every website request in the server log.
+	LogRequests bool `json:"log_requests,omitempty"`
+	PortMin     int  `json:"port_min"`
+	PortMax     int  `json:"port_max"`
 	// Visitors one tunnel may have connected at once (0 = 1000).
 	MaxConnsPerTunnel int          `json:"max_conns_per_tunnel,omitempty"`
 	Users             []UserConfig `json:"users"`
@@ -130,6 +139,9 @@ func loadServerConfig(path string) (*ServerConfig, error) {
 		}
 		u.TokenHash = h
 	}
+	if _, err := parsePrefixes(cfg.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("%s: trusted_proxies: %w", path, err)
+	}
 	return cfg, nil
 }
 
@@ -164,6 +176,9 @@ type Server struct {
 	httpOn  bool
 	limits  limits
 	hs      handshakes
+	proxy   *httputil.ReverseProxy
+
+	trustedProxies []netip.Prefix
 
 	mu       sync.Mutex
 	users    []UserConfig
@@ -178,6 +193,12 @@ type session struct {
 	tokenHash string
 	ctrl      net.Conn
 	caps      []string // negotiated with the client
+
+	// website tunnels
+	auth      string // "user:password", or "" for none
+	allow     []netip.Prefix
+	transport *http.Transport
+	logs      chan Msg
 
 	wmu       sync.Mutex
 	closed    chan struct{}
@@ -228,7 +249,7 @@ func newServer(cfgPath string, cfg *ServerConfig) *Server {
 	if connsPerTunnel == 0 {
 		connsPerTunnel = defaultMaxConnsPerTunnel
 	}
-	return &Server{
+	srv := &Server{
 		cfgPath: cfgPath,
 		cfg:     cfg,
 		limits: limits{
@@ -242,6 +263,9 @@ func newServer(cfgPath string, cfg *ServerConfig) *Server {
 		claims:   map[string]*session{},
 		pending:  map[string]chan net.Conn{},
 	}
+	srv.trustedProxies, _ = parsePrefixes(cfg.TrustedProxies) // checked by loadServerConfig
+	srv.proxy = newProxy(srv)
+	return srv
 }
 
 func (srv *Server) run() error {
@@ -263,16 +287,20 @@ func (srv *Server) run() error {
 		}
 		srv.httpOn = true
 		log.Printf("http tunnels on %s", cfg.HTTPAddr)
-		go srv.serveHTTP(hl)
+		go srv.serveHTTP(hl, nil)
 	}
 	if cfg.HTTPSAddr != "" {
-		hl, err := listen(cfg.HTTPSAddr, cfg.HTTPSCert, cfg.HTTPSKey)
+		cr := &certReloader{cert: cfg.HTTPSCert, key: cfg.HTTPSKey}
+		if _, err := cr.get(nil); err != nil {
+			return err
+		}
+		hl, err := net.Listen("tcp", cfg.HTTPSAddr)
 		if err != nil {
 			return err
 		}
 		srv.httpOn = true
 		log.Printf("https tunnels on %s", cfg.HTTPSAddr)
-		go srv.serveHTTP(hl)
+		go srv.serveHTTP(hl, &tls.Config{GetCertificate: cr.get})
 	}
 	go srv.watchUsers()
 
@@ -515,6 +543,21 @@ func (srv *Server) setupTunnel(s *session, hello Msg) (Msg, func(), error) {
 		if !srv.httpOn {
 			return Msg{}, nil, errors.New("http tunnels are not enabled on this server")
 		}
+		if hello.Auth != "" && !strings.Contains(hello.Auth, ":") {
+			return Msg{}, nil, errors.New("auth must be user:password")
+		}
+		allow, err := parsePrefixes(hello.Allow)
+		if err != nil {
+			return Msg{}, nil, err
+		}
+		// Everything a visitor's request needs is set before the claim
+		// makes the tunnel reachable.
+		s.auth, s.allow = hello.Auth, allow
+		s.transport = s.newTransport()
+		if s.has("http-log") {
+			s.logs = make(chan Msg, 64)
+			go s.sendLogs()
+		}
 		sub := strings.ToLower(hello.Subdomain)
 		if sub == "" {
 			for {
@@ -531,7 +574,10 @@ func (srv *Server) setupTunnel(s *session, hello Msg) (Msg, func(), error) {
 				return Msg{}, nil, err
 			}
 		}
-		cleanup := func() { srv.release("http/"+sub, s) }
+		cleanup := func() {
+			srv.release("http/"+sub, s)
+			s.transport.CloseIdleConnections()
+		}
 		return Msg{Type: "ok", URL: srv.httpURL(sub), Subdomain: sub}, cleanup, nil
 	}
 	return Msg{}, nil, fmt.Errorf("unknown tunnel type %q", hello.Proto)
