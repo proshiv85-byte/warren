@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,6 +177,7 @@ type session struct {
 	user      string
 	tokenHash string
 	ctrl      net.Conn
+	caps      []string // negotiated with the client
 
 	wmu       sync.Mutex
 	closed    chan struct{}
@@ -424,8 +426,12 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 		s.send(Msg{Type: "error", Error: msg, Fatal: fatal})
 	}
 
-	if hello.Version != protoVersion {
-		fail(true, "protocol version mismatch (server %d, client %d): update warren", protoVersion, hello.Version)
+	if hello.Version > protoVersion {
+		fail(true, "this server runs an older warren (protocol %d, client %d): ask the server admin to run \"warren update\"", protoVersion, hello.Version)
+		return
+	}
+	if hello.Version < protoVersion {
+		fail(true, "your warren is too old for this server (protocol %d, server %d): run \"warren update\"", hello.Version, protoVersion)
 		return
 	}
 	user := srv.authenticate(hello.Token)
@@ -434,6 +440,7 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 		return
 	}
 	s.user, s.tokenHash = user.Name, user.tokenHash()
+	s.caps = negotiateCaps(hello.Caps)
 
 	// Claim first: a reconnecting client asks for its old port/subdomain,
 	// which kicks its own stale session, so that one isn't counted below.
@@ -466,10 +473,11 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 		srv.mu.Unlock()
 	}()
 
+	ok.Caps = s.caps
 	if err := s.send(ok); err != nil {
 		return
 	}
-	log.Printf("[%s] opened %s (from %s)", s.user, ok.URL, c.RemoteAddr())
+	log.Printf("[%s] opened %s (from %s, caps %s)", s.user, ok.URL, c.RemoteAddr(), capsString(s.caps))
 
 	go s.pinger()
 	br := bufio.NewReader(c)
@@ -658,6 +666,8 @@ func (srv *Server) serveTCP(ln net.Listener, s *session) {
 		}()
 	}
 }
+
+func (s *session) has(c string) bool { return slices.Contains(s.caps, c) }
 
 func (s *session) send(m Msg) error {
 	s.wmu.Lock()

@@ -108,6 +108,8 @@ type client struct {
 	subdomain  string
 	proxyProto bool
 	online     bool
+	caps       []string      // negotiated with the server for the current session
+	stop       chan struct{} // closing it ends run; nil runs forever
 }
 
 type fatalError struct{ msg string }
@@ -184,8 +186,17 @@ func (c *client) run() error {
 		if !c.online && errors.Is(err, io.EOF) && !c.useTLS {
 			err = fmt.Errorf("%w (if the server uses TLS, add --tls)", err)
 		}
+		select {
+		case <-c.stop:
+			return nil
+		default:
+		}
 		log.Printf("disconnected (%v), reconnecting in %s", err, backoff)
-		time.Sleep(backoff)
+		select {
+		case <-c.stop:
+			return nil
+		case <-time.After(backoff):
+		}
 		backoff = min(backoff*2, 30*time.Second)
 	}
 }
@@ -223,10 +234,19 @@ func (c *client) session() error {
 		return err
 	}
 	defer conn.Close()
+	ended := make(chan struct{})
+	defer close(ended)
+	go func() {
+		select {
+		case <-c.stop:
+			conn.Close()
+		case <-ended:
+		}
+	}()
 
 	conn.SetDeadline(time.Now().Add(15 * time.Second))
 	err = writeMsg(conn, Msg{Type: "hello", Version: protoVersion, Token: c.token,
-		Proto: c.proto, Port: c.port, Subdomain: c.subdomain})
+		Proto: c.proto, Port: c.port, Subdomain: c.subdomain, Caps: supportedCaps})
 	if err != nil {
 		return err
 	}
@@ -247,6 +267,8 @@ func (c *client) session() error {
 		return fmt.Errorf("unexpected reply %q", m.Type)
 	}
 	conn.SetDeadline(time.Time{})
+	// Only what the server echoed back counts; an older server sends nothing.
+	c.caps = negotiateCaps(m.Caps)
 
 	// Ask for the same port/subdomain again if we have to reconnect.
 	c.port, c.subdomain = m.Port, m.Subdomain
