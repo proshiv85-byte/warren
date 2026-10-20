@@ -345,6 +345,8 @@ func (c *client) session() error {
 			}
 		case "conn":
 			go c.handleStream(m.ID, m.Remote, logConn)
+		case "notice":
+			log.Printf("warning: %s", m.Error)
 		case "req":
 			if r := m.Req; r != nil {
 				log.Printf("%-7s %3d %6dms  %-15s %s", r.Method, r.Status, r.Ms, r.Remote, r.Path)

@@ -8,7 +8,7 @@ other than your VPS's bandwidth.
 - **UDP tunnels**: Minecraft Bedrock, Factorio, other UDP games
 - **Website tunnels**: `https://name.tunnel.example.com` → your local web app, through a
   real reverse proxy: HTTP/2, websockets, `X-Forwarded-For`, optional password or IP
-  allowlist, and request logs
+  allowlist, request logs, and automatic per-subdomain certificates
 - Separate token per friend, add or remove users without restarting
 - Auto-reconnect that keeps the same public port/subdomain
 - Optional TLS, optional PROXY protocol (so your Minecraft server sees real player IPs)
@@ -64,6 +64,7 @@ warren update                             # update to the latest release
 | `http_addr` | Address for website tunnels, e.g. `:80`. Leave empty to disable |
 | `https_addr`, `https_cert`, `https_key` | HTTPS for website tunnels; the cert must cover `*.domain` |
 | `public_http_port` | Port shown in website URLs when a reverse proxy sits in front |
+| `acme`, `acme_email`, `acme_dir`, `acme_ca` | Get a certificate for each website tunnel automatically (Let's Encrypt) |
 | `https_redirect` | Redirect `http://` website visitors to `https://` |
 | `trusted_proxies` | Proxies in front of warren whose `X-Forwarded-For` is believed |
 | `log_requests` | Log every website request |
@@ -82,7 +83,7 @@ Admin commands read `/etc/warren/server.json` by default. Override it with
 
 ## Building
 
-Requires Go 1.22+.
+Requires Go 1.26+.
 
 ```sh
 make build   # ./warren for this machine

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	crand "crypto/rand"
@@ -586,4 +587,74 @@ func TestPoolNotOffered(t *testing.T) {
 	if m.ID != "" {
 		t.Errorf("pool id handed out without the capability: %+v", m)
 	}
+}
+
+// ---- automatic certificates ----
+
+func TestACMEPolicy(t *testing.T) {
+	srv, _, _ := startServerSrv(t, nil)
+	srv.mu.Lock()
+	srv.claims["http/app"] = &session{}
+	srv.mu.Unlock()
+	for host, ok := range map[string]bool{
+		"app.tunnel.test":       true,
+		"APP.tunnel.test":       true,
+		"ghost.tunnel.test":     false, // not online
+		"a.app.tunnel.test":     false,
+		"tunnel.test":           false,
+		"app.tunnel.test.evil":  false,
+		"app.other.example.com": false,
+	} {
+		if err := srv.acmePolicy(context.Background(), host); (err == nil) != ok {
+			t.Errorf("%s: %v", host, err)
+		}
+	}
+}
+
+func TestCertSourcePrefersCoveringFile(t *testing.T) {
+	dir := t.TempDir()
+	cert, key := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	writeTestCert(t, cert, key) // *.tunnel.test
+	cfg := &ServerConfig{Domain: "tunnel.test", HTTPSAddr: ":443", HTTPSCert: cert, HTTPSKey: key,
+		ACME: true, ACMEDir: filepath.Join(dir, "acme")}
+	cs, err := newCertSource(newServer(filepath.Join(dir, "server.json"), cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, err := cs.get(&tls.ClientHelloInfo{ServerName: "app.tunnel.test"}); err != nil || !covers(c, "app.tunnel.test") {
+		t.Errorf("covered name: %v", err)
+	}
+	// Not covered by the file, and not an online tunnel: ACME must refuse
+	// rather than ask a CA for it.
+	if _, err := cs.get(&tls.ClientHelloInfo{ServerName: "a.b.tunnel.test"}); err == nil || !strings.Contains(err.Error(), "not a website tunnel") {
+		t.Errorf("uncovered name: %v", err)
+	}
+}
+
+func TestACMEConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.json")
+	saveServerConfig(path, &ServerConfig{Domain: "tunnel.test", ACME: true})
+	if _, err := loadServerConfig(path); err == nil || !strings.Contains(err.Error(), "https_addr") {
+		t.Errorf("acme without https_addr: %v", err)
+	}
+	cfg := &ServerConfig{Domain: "tunnel.test", HTTPSAddr: ":443"}
+	if _, err := newCertSource(newServer(path, cfg)); err == nil {
+		t.Error("https_addr without a certificate or acme should fail")
+	}
+}
+
+func TestACMEFailureNotice(t *testing.T) {
+	var logs syncBuffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	ctrl, _ := startServer(t, func(cfg *ServerConfig) {
+		cfg.HTTPSAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t))
+		cfg.ACME = true
+		cfg.ACMECA = fmt.Sprintf("http://127.0.0.1:%d/dir", freePort(t)) // nothing there
+	})
+	runClient(t, &client{server: ctrl, proto: "http", local: "127.0.0.1:1", subdomain: "app"})
+	waitFor(t, func() bool {
+		return strings.Contains(logs.String(), "warning: could not get an HTTPS certificate for app.tunnel.test")
+	})
 }

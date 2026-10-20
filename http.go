@@ -36,8 +36,12 @@ const maxHeaderBytes = 64 << 10
 
 // serveHTTP serves website tunnels on ln, with TLS when tc is not nil.
 func (srv *Server) serveHTTP(ln net.Listener, tc *tls.Config) {
+	var h http.Handler = http.HandlerFunc(srv.handleHTTP)
+	if tc == nil {
+		h = srv.certs.httpHandler(h)
+	}
 	hs := &http.Server{
-		Handler:           http.HandlerFunc(srv.handleHTTP),
+		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
 		MaxHeaderBytes:    maxHeaderBytes, // larger requests get a 431
 		IdleTimeout:       2 * time.Minute,

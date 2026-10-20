@@ -441,6 +441,7 @@ ask_questions() {
 
 	# Website tunnels need wildcard subdomains, so only with a domain.
 	WEB=
+	WEB_ACME=
 	HTTP_ADDR=
 	PUBLIC_HTTP_PORT=
 	USE_NGINX=
@@ -507,6 +508,17 @@ ask_questions() {
 			CF_TOKEN=$REPLY
 		done
 	fi
+	# Without a wildcard, warren can get a certificate per website tunnel itself.
+	local p443
+	p443=$(port_owner 443)
+	if [[ -n $WEB && $TLS_MODE != cloudflare ]] && [[ -z $p443 || $p443 == warren ]]; then
+		say ""
+		say "  warren can also get an https:// certificate for each website tunnel"
+		say "  by itself, from Let's Encrypt, with no DNS setup. It uses port 443."
+		if ask_yn "Give website tunnels https:// addresses?" y; then
+			WEB_ACME=y
+		fi
+	fi
 	# Let's Encrypt's port 80 check goes through nginx when nginx owns port 80.
 	if [[ $TLS_MODE == le && $p80 == nginx ]]; then
 		USE_NGINX=y
@@ -525,7 +537,7 @@ confirm() {
 	printf '  %-22s %s\n' "Game ports" "$PORT_MIN-$PORT_MAX (TCP and UDP)"
 	if [[ -n $WEB ]]; then
 		local scheme=http
-		[[ $TLS_MODE == cloudflare ]] && scheme=https
+		[[ $TLS_MODE == cloudflare || -n $WEB_ACME ]] && scheme=https
 		printf '  %-22s %s\n' "Website tunnels" "$scheme://NAME.$DOMAIN"
 	else
 		printf '  %-22s %s\n' "Website tunnels" "off"
@@ -760,6 +772,9 @@ write_config() {
 	[[ -n $WEB && -n $PUBLIC_HTTP_PORT ]] && lines+=("\"public_http_port\": $PUBLIC_HTTP_PORT")
 	# nginx in front: believe the visitor IPs it passes along.
 	[[ -n $WEB && $HTTP_ADDR == 127.0.0.1:* ]] && lines+=("\"trusted_proxies\": [\"127.0.0.1\"]")
+	if [[ -n $WEB_ACME ]]; then
+		lines+=("\"https_addr\": \":443\"" "\"acme\": true" "\"https_redirect\": true")
+	fi
 	if [[ -n $WEB && $TLS_MODE == cloudflare ]]; then
 		lines+=("\"https_addr\": \":443\"" "\"https_cert\": \"$TLS_DIR/cert.pem\"" "\"https_key\": \"$TLS_DIR/key.pem\"")
 	fi
@@ -803,7 +818,7 @@ open_firewall() {
 	# Port 80 for website tunnels (directly or through nginx) and for
 	# Let's Encrypt's checks when the certificate is issued and renewed.
 	[[ -n $WEB || $TLS_MODE == le ]] && tcp+=(80)
-	[[ -n $WEB && $TLS_MODE == cloudflare ]] && tcp+=(443)
+	[[ -n $WEB && ($TLS_MODE == cloudflare || -n $WEB_ACME) ]] && tcp+=(443)
 
 	local done_fw=
 	if have ufw && ufw status 2>/dev/null | grep "Status: active" >/dev/null; then

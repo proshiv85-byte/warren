@@ -332,6 +332,7 @@ version once from the releases page, and use `warren update` from then on.
 | Website shows `tunnel "x" is not online` | Your warren window for that subdomain isn't running. |
 | Website shows `local service ... is not running` | Your web app isn't running, or it's on a different port. |
 | `this server is too old to protect tunnels with --auth` | Ask the server owner to run `warren update`. Until then, leave out `--auth`/`--allow`. |
+| `warning: could not get an HTTPS certificate` | The server couldn't get a certificate for your subdomain. Tell the server owner; the message says why. |
 | Players see "Invalid IP / proxy" errors or can't join after enabling PROXY protocol | You enabled it on only one side. See [Seeing real player IPs](#seeing-real-player-ips-optional-minecraft). |
 
 ---

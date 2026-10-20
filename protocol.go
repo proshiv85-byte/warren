@@ -54,6 +54,7 @@ var supportedCaps = []string{
 	"http-log",   // the server sends "req" messages
 	"http-reuse", // website streams are kept alive and reused
 	"pool",       // the client keeps idle data connections open (pool.go)
+	"notice",     // the server may send {"type":"notice","error":..} warnings
 }
 
 // negotiateCaps returns the capabilities in offered that we support too.

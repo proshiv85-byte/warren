@@ -91,6 +91,11 @@ type ServerConfig struct {
 	HTTPSRedirect bool `json:"https_redirect,omitempty"`
 	// Proxies in front of warren whose X-Forwarded-For/-Proto are believed.
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	// Get a certificate for each website tunnel automatically (certs.go).
+	ACME      bool   `json:"acme,omitempty"`
+	ACMEEmail string `json:"acme_email,omitempty"` // optional, for expiry notices
+	ACMEDir   string `json:"acme_dir,omitempty"`   // default: "acme" next to the config
+	ACMECA    string `json:"acme_ca,omitempty"`    // ACME directory URL; default Let's Encrypt
 	// Log every website request in the server log.
 	LogRequests bool `json:"log_requests,omitempty"`
 	PortMin     int  `json:"port_min"`
@@ -139,6 +144,9 @@ func loadServerConfig(path string) (*ServerConfig, error) {
 		}
 		u.TokenHash = h
 	}
+	if cfg.ACME && cfg.HTTPSAddr == "" {
+		return nil, fmt.Errorf("%s: \"acme\" needs https_addr (usually \":443\")", path)
+	}
 	if _, err := parsePrefixes(cfg.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("%s: trusted_proxies: %w", path, err)
 	}
@@ -177,6 +185,7 @@ type Server struct {
 	limits  limits
 	hs      handshakes
 	proxy   *httputil.ReverseProxy
+	certs   *certSource // for https_addr, nil without it
 
 	trustedProxies []netip.Prefix
 
@@ -273,6 +282,12 @@ func newServer(cfgPath string, cfg *ServerConfig) *Server {
 
 func (srv *Server) run() error {
 	cfg := srv.cfg
+	if cfg.HTTPSAddr != "" {
+		var err error
+		if srv.certs, err = newCertSource(srv); err != nil {
+			return err
+		}
+	}
 	ln, err := listen(cfg.Listen, cfg.TLSCert, cfg.TLSKey)
 	if err != nil {
 		return err
@@ -293,17 +308,13 @@ func (srv *Server) run() error {
 		go srv.serveHTTP(hl, nil)
 	}
 	if cfg.HTTPSAddr != "" {
-		cr := &certReloader{cert: cfg.HTTPSCert, key: cfg.HTTPSKey}
-		if _, err := cr.get(nil); err != nil {
-			return err
-		}
 		hl, err := net.Listen("tcp", cfg.HTTPSAddr)
 		if err != nil {
 			return err
 		}
 		srv.httpOn = true
-		log.Printf("https tunnels on %s", cfg.HTTPSAddr)
-		go srv.serveHTTP(hl, &tls.Config{GetCertificate: cr.get})
+		log.Printf("https tunnels on %s (automatic certificates: %v)", cfg.HTTPSAddr, cfg.ACME)
+		go srv.serveHTTP(hl, srv.certs.tlsConfig())
 	}
 	go srv.watchUsers()
 
@@ -515,6 +526,9 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 		return
 	}
 	log.Printf("[%s] opened %s (from %s, caps %s)", s.user, ok.URL, c.RemoteAddr(), capsString(s.caps))
+	if hello.Proto == "http" {
+		go srv.warmCert(s, ok.Subdomain)
+	}
 
 	go s.pinger()
 	br := bufio.NewReader(c)
