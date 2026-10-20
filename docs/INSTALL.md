@@ -393,6 +393,52 @@ they just re-run `warren login ... --tls`.
 
 ---
 
+## Step 8 (optional): HTTPS website tunnels without a wildcard
+
+If you didn't do Option B, warren can get a certificate for each website
+tunnel by itself, from Let's Encrypt, as the tunnel opens. It works with any
+DNS provider and needs no certbot. Add to `server.json`:
+
+```json
+  "https_addr": ":443",
+  "acme": true,
+  "https_redirect": true,
+```
+
+then open port 443 (`ufw allow 443/tcp`, and in your provider's firewall)
+and `systemctl restart warren`.
+
+- Let's Encrypt checks the name over port 443 (or port 80 when warren serves
+  `http_addr` there), so **443 must be reachable** from the internet.
+- Certificates are kept in `/etc/warren/acme` and renewed automatically.
+  `acme_dir` changes where. `acme_email` (optional) gets expiry warnings.
+- warren only asks for certificates for tunnels that are online, so
+  strangers can't make it request certificates for made-up names.
+- Let's Encrypt issues at most 50 certificates a week per domain. A tunnel
+  that keeps its `--subdomain` reuses its certificate, but every **random**
+  subdomain needs a new one. With many friends using random names, a wildcard
+  (Option B) is the better fit. If you set `https_cert`/`https_key` as well,
+  that certificate is used for every name it covers and `acme` for the rest.
+- Certificates are public: every subdomain that gets one shows up in
+  Certificate Transparency logs.
+
+If a certificate can't be issued, the server log and the friend's warren
+window both say why.
+
+### Website tunnel options
+
+| Key | Meaning |
+|---|---|
+| `https_redirect` | Send `http://` visitors to the `https://` address. |
+| `log_requests` | Log every website request in the server log (`journalctl -u warren`). |
+| `trusted_proxies` | IPs or ranges of proxies in front of warren, e.g. `["127.0.0.1"]` for nginx on the same VPS. Their `X-Forwarded-For` and `X-Forwarded-Proto` are believed. |
+
+warren always adds `X-Forwarded-For`, `X-Forwarded-Host` and
+`X-Forwarded-Proto` to requests it passes to a website tunnel, and drops any
+a visitor sent (except from a trusted proxy).
+
+---
+
 ## Managing friends
 
 All of these run on the VPS:
@@ -456,7 +502,8 @@ different HTTP port and let nginx forward tunnel traffic to it.
    ```
    `http_addr` makes warren listen only locally on 8080. `public_http_port`
    makes the URLs it prints say port 80, because that's where nginx serves
-   them.
+   them. Also add `"trusted_proxies": ["127.0.0.1"]`, or every visitor looks
+   like they come from nginx (which breaks `--allow`).
 
 2. Add an nginx site, e.g. `/etc/nginx/sites-enabled/warren`:
    ```nginx
@@ -467,6 +514,8 @@ different HTTP port and let nginx forward tunnel traffic to it.
            proxy_pass http://127.0.0.1:8080;
            proxy_http_version 1.1;
            proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
            proxy_set_header Upgrade $http_upgrade;
            proxy_set_header Connection "upgrade";
        }
@@ -489,6 +538,7 @@ different HTTP port and let nginx forward tunnel traffic to it.
 | Tunnel is "online" but players can't connect | The public port is blocked: check the firewall range (Step 4) and your provider's firewall. Test with `nc -vz tunnel.example.com PORT` from another machine. |
 | `port N is outside the allowed range` | The friend asked for a port outside `port_min`–`port_max`. Widen the range or pick another port. |
 | `port N is not available` | Another program on the VPS already uses that port (e.g. SSH on 22). Pick a different one. |
+| Website shows a certificate error with `"acme": true` | Port 443 isn't reachable from the internet, or Let's Encrypt's limit was hit. `journalctl -u warren | grep certificate` says which. |
 | Website tunnel shows `no tunnel here` | The wildcard DNS record `*.tunnel` is missing, or `domain` in the config doesn't match. |
 | Added a user but they get `invalid token` | Make sure `/etc/warren/server.json` is readable by the warren user: `chown warren:warren /etc/warren/server.json`. |
 

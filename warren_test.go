@@ -114,8 +114,19 @@ func echoTCP(t *testing.T) string {
 // startClient runs a tunnel client in the background, as "warren PROTO" would.
 func startClient(t *testing.T, server, proto, local string, port int, sub string) {
 	t.Helper()
-	c := &client{server: server, token: testToken, proto: proto, local: local, port: port, subdomain: sub}
-	go c.run()
+	runClient(t, &client{server: server, token: testToken, proto: proto, local: local, port: port, subdomain: sub})
+}
+
+// runClient runs c in the background until the test ends.
+func runClient(t *testing.T, c *client) {
+	t.Helper()
+	if c.token == "" {
+		c.token = testToken
+	}
+	c.stop = make(chan struct{})
+	exited := make(chan struct{})
+	go func() { c.run(); close(exited) }()
+	t.Cleanup(func() { close(c.stop); <-exited })
 }
 
 // hello opens a raw control connection and returns it with the server's reply.
@@ -256,7 +267,7 @@ func TestHTTPRoutingByHost(t *testing.T) {
 		}
 		defer c.Close()
 		c.SetDeadline(time.Now().Add(5 * time.Second))
-		fmt.Fprintf(c, "GET / HTTP/1.1\r\nHost: %s\r\n\r\n", host)
+		fmt.Fprintf(c, "GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host)
 		b, _ := io.ReadAll(c)
 		return string(b)
 	}
@@ -680,7 +691,7 @@ func TestHTTPBusy(t *testing.T) {
 		}
 		defer c.Close()
 		c.SetDeadline(time.Now().Add(5 * time.Second))
-		fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: alice.tunnel.test\r\n\r\n", path)
+		fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: alice.tunnel.test\r\nConnection: close\r\n\r\n", path)
 		b, _ := io.ReadAll(c)
 		return string(b)
 	}

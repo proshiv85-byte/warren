@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -21,30 +22,88 @@ import (
 // Every connection to the server's control port starts with one JSON line.
 //
 //   Control connection (one per tunnel):
-//     client -> {"type":"hello","version":1,"token":..,"proto":"tcp","port":25565}
-//     server -> {"type":"ok","url":..,"port":25565}  or  {"type":"error",..}
+//     client -> {"type":"hello","version":1,"token":..,"proto":"tcp","port":25565,"caps":[..]}
+//     server -> {"type":"ok","url":..,"port":25565,"caps":[..]}  or  {"type":"error",..}
 //     then server sends {"type":"conn","id":..,"remote":..} for every visitor
 //     and {"type":"ping"} periodically; the client answers {"type":"pong"}.
+//     With "http-log" the server also sends {"type":"req","req":{..}} for
+//     every request a website tunnel served.
 //
 //   Data connection (one per visitor):
-//     client -> {"type":"join","id":..}
+//     client -> {"type":"join","id":..}  (or "idle" ahead of time, see pool.go)
 //     after that the connection carries raw visitor bytes. For UDP tunnels it
-//     carries datagrams framed as a 2-byte big-endian length + payload.
+//     carries datagrams framed as a 2-byte big-endian length + payload. For
+//     website tunnels it carries HTTP/1.1 requests from the server's proxy;
+//     with "http-reuse" one stream may carry several visitors' requests.
+//
+// Capabilities
+//
+// The version only changes for changes that old peers can't cope with at all.
+// Everything else is a capability: the client lists the ones it supports in
+// hello, and the server answers in ok with the ones both sides support. Only
+// those may be used on the session. Peers that predate capabilities send no
+// "caps" and ignore the field, so they negotiate to none and keep working
+// the way they always did.
 
 const protoVersion = 1
 
+// capabilities this build supports, on either side.
+var supportedCaps = []string{
+	"http-auth",  // hello may set "auth"
+	"http-allow", // hello may set "allow"
+	"http-log",   // the server sends "req" messages
+	"http-reuse", // website streams are kept alive and reused
+	"pool",       // the client keeps idle data connections open (pool.go)
+	"notice",     // the server may send {"type":"notice","error":..} warnings
+}
+
+// negotiateCaps returns the capabilities in offered that we support too.
+func negotiateCaps(offered []string) []string {
+	var both []string
+	for _, c := range offered {
+		if slices.Contains(supportedCaps, c) && !slices.Contains(both, c) {
+			both = append(both, c)
+		}
+	}
+	return both
+}
+
 type Msg struct {
-	Type      string `json:"type"`
-	Version   int    `json:"version,omitempty"`
-	Token     string `json:"token,omitempty"`
-	Proto     string `json:"proto,omitempty"`
-	Port      int    `json:"port,omitempty"`
-	Subdomain string `json:"subdomain,omitempty"`
-	ID        string `json:"id,omitempty"`
-	Remote    string `json:"remote,omitempty"`
-	URL       string `json:"url,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Fatal     bool   `json:"fatal,omitempty"`
+	Type      string   `json:"type"`
+	Version   int      `json:"version,omitempty"`
+	Token     string   `json:"token,omitempty"`
+	Proto     string   `json:"proto,omitempty"`
+	Port      int      `json:"port,omitempty"`
+	Subdomain string   `json:"subdomain,omitempty"`
+	ID        string   `json:"id,omitempty"`
+	Remote    string   `json:"remote,omitempty"`
+	URL       string   `json:"url,omitempty"`
+	Error     string   `json:"error,omitempty"`
+	Fatal     bool     `json:"fatal,omitempty"`
+	Caps      []string `json:"caps,omitempty"`
+
+	// Website tunnel options, in hello ("http-auth", "http-allow").
+	Auth  string   `json:"auth,omitempty"`  // "user:password" for basic auth
+	Allow []string `json:"allow,omitempty"` // IPs and CIDR ranges allowed in
+
+	Req *ReqLog `json:"req,omitempty"` // in "req" messages ("http-log")
+}
+
+// ReqLog describes one request served by a website tunnel.
+type ReqLog struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Status int    `json:"status"`
+	Ms     int64  `json:"ms"`
+	Bytes  int64  `json:"bytes"`
+	Remote string `json:"remote"`
+}
+
+func capsString(caps []string) string {
+	if len(caps) == 0 {
+		return "none"
+	}
+	return strings.Join(caps, ",")
 }
 
 // readLine reads one '\n'-terminated line a byte at a time, so nothing past

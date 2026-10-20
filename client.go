@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -107,7 +108,25 @@ type client struct {
 	port       int
 	subdomain  string
 	proxyProto bool
+	auth       string   // http: "user:password"
+	allow      []string // http: IPs and CIDR ranges
 	online     bool
+	caps       []string      // negotiated with the server for the current session
+	stop       chan struct{} // closing it ends run; nil runs forever
+}
+
+// listFlag collects a flag that may be repeated or comma-separated.
+type listFlag []string
+
+func (l *listFlag) String() string { return strings.Join(*l, ",") }
+
+func (l *listFlag) Set(v string) error {
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			*l = append(*l, s)
+		}
+	}
+	return nil
 }
 
 type fatalError struct{ msg string }
@@ -125,6 +144,8 @@ func cmdTunnel(proto string, args []string) error {
 	c := &client{proto: proto}
 	if proto == "http" {
 		fs.StringVar(&c.subdomain, "subdomain", "", "subdomain to request (default: random)")
+		fs.StringVar(&c.auth, "auth", "", "require this `user:password` from visitors (basic auth)")
+		fs.Var((*listFlag)(&c.allow), "allow", "only let in these `IPs` or ranges, e.g. 203.0.113.7,198.51.100.0/24 (repeatable)")
 	} else {
 		fs.IntVar(&c.port, "port", 0, "public port to request on the server (default: random)")
 	}
@@ -145,6 +166,12 @@ func cmdTunnel(proto string, args []string) error {
 	}
 	if *server == "" || *token == "" {
 		return errors.New("no server/token configured: run \"warren login --server HOST --token TOKEN\" first")
+	}
+	if u, p, ok := strings.Cut(c.auth, ":"); c.auth != "" && (!ok || u == "" || p == "") {
+		return errors.New("--auth must be user:password")
+	}
+	if _, err := parsePrefixes(c.allow); err != nil {
+		return fmt.Errorf("--allow: %w", err)
 	}
 
 	c.server, c.token, c.useTLS, c.insecure = *server, *token, *useTLS, *insecure
@@ -184,8 +211,17 @@ func (c *client) run() error {
 		if !c.online && errors.Is(err, io.EOF) && !c.useTLS {
 			err = fmt.Errorf("%w (if the server uses TLS, add --tls)", err)
 		}
+		select {
+		case <-c.stop:
+			return nil
+		default:
+		}
 		log.Printf("disconnected (%v), reconnecting in %s", err, backoff)
-		time.Sleep(backoff)
+		select {
+		case <-c.stop:
+			return nil
+		case <-time.After(backoff):
+		}
 		backoff = min(backoff*2, 30*time.Second)
 	}
 }
@@ -223,10 +259,20 @@ func (c *client) session() error {
 		return err
 	}
 	defer conn.Close()
+	ended := make(chan struct{})
+	defer close(ended)
+	go func() {
+		select {
+		case <-c.stop:
+			conn.Close()
+		case <-ended:
+		}
+	}()
 
 	conn.SetDeadline(time.Now().Add(15 * time.Second))
 	err = writeMsg(conn, Msg{Type: "hello", Version: protoVersion, Token: c.token,
-		Proto: c.proto, Port: c.port, Subdomain: c.subdomain})
+		Proto: c.proto, Port: c.port, Subdomain: c.subdomain, Caps: c.offerCaps(),
+		Auth: c.auth, Allow: c.allow})
 	if err != nil {
 		return err
 	}
@@ -247,6 +293,16 @@ func (c *client) session() error {
 		return fmt.Errorf("unexpected reply %q", m.Type)
 	}
 	conn.SetDeadline(time.Time{})
+	// Only what the server echoed back counts; an older server sends nothing.
+	c.caps = negotiateCaps(m.Caps)
+	// An older server ignores options it doesn't know, which would leave the
+	// site open; hang up before anyone can visit.
+	if c.auth != "" && !c.has("http-auth") {
+		return fatalError{"this server is too old to protect tunnels with --auth: ask the server admin to run \"warren update\""}
+	}
+	if len(c.allow) > 0 && !c.has("http-allow") {
+		return fatalError{"this server is too old to restrict tunnels with --allow: ask the server admin to run \"warren update\""}
+	}
 
 	// Ask for the same port/subdomain again if we have to reconnect.
 	c.port, c.subdomain = m.Port, m.Subdomain
@@ -255,9 +311,24 @@ func (c *client) session() error {
 		if c.proto != "http" {
 			fmt.Printf("  people connect to: %s\n\n", strings.TrimPrefix(m.URL, c.proto+"://"))
 		}
+		if c.auth != "" {
+			fmt.Printf("  visitors need the password for user %q\n", strings.SplitN(c.auth, ":", 2)[0])
+		}
+		if len(c.allow) > 0 {
+			fmt.Printf("  only open to: %s\n", strings.Join(c.allow, ", "))
+		}
+		if c.auth != "" || len(c.allow) > 0 {
+			fmt.Println()
+		}
 		c.online = true
 	} else {
 		log.Printf("reconnected: %s", m.URL)
+	}
+	logConn := !c.has("http-log")
+	if c.has("pool") && m.ID != "" {
+		done := make(chan struct{})
+		defer close(done)
+		c.keepPool(m.ID, done, logConn)
 	}
 
 	for {
@@ -273,7 +344,13 @@ func (c *client) session() error {
 				return err
 			}
 		case "conn":
-			go c.handleStream(m.ID, m.Remote)
+			go c.handleStream(m.ID, m.Remote, logConn)
+		case "notice":
+			log.Printf("warning: %s", m.Error)
+		case "req":
+			if r := m.Req; r != nil {
+				log.Printf("%-7s %3d %6dms  %-15s %s", r.Method, r.Status, r.Ms, r.Remote, r.Path)
+			}
 		case "error":
 			if m.Fatal {
 				return fatalError{"server: " + m.Error}
@@ -283,45 +360,58 @@ func (c *client) session() error {
 	}
 }
 
-func (c *client) handleStream(id, remote string) {
-	var local net.Conn
-	var localErr error
-	if c.proto != "udp" {
-		local, localErr = net.DialTimeout("tcp", c.local, 5*time.Second)
+// offerCaps lists the capabilities to ask the server for.
+func (c *client) offerCaps() []string {
+	var caps []string
+	for _, cp := range supportedCaps {
+		// A PROXY header describes one visitor, so each one needs its own stream.
+		if cp == "http-reuse" && c.proxyProto {
+			continue
+		}
+		caps = append(caps, cp)
 	}
+	return caps
+}
 
+func (c *client) has(cp string) bool { return slices.Contains(c.caps, cp) }
+
+// handleStream opens a data connection for a visitor the server announced.
+func (c *client) handleStream(id, remote string, logConn bool) {
 	data, err := c.dial()
 	if err != nil {
 		log.Printf("opening stream: %v", err)
-		if local != nil {
-			local.Close()
-		}
 		return
 	}
 	data.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := writeMsg(data, Msg{Type: "join", ID: id}); err != nil {
 		data.Close()
-		if local != nil {
-			local.Close()
-		}
 		return
 	}
 	data.SetWriteDeadline(time.Time{})
+	c.serveStream(data, remote, logConn)
+}
 
+// serveStream connects a visitor's data connection to the local service.
+// logConn says whether to log it (website tunnels with "http-log" log each
+// request instead).
+func (c *client) serveStream(data net.Conn, remote string, logConn bool) {
 	if c.proto == "udp" {
 		clientUDP(data, c.local, remote)
 		return
 	}
-	if localErr != nil {
-		log.Printf("connection from %s, but nothing is listening on %s: %v", remote, c.local, localErr)
+	local, err := net.DialTimeout("tcp", c.local, 5*time.Second)
+	if err != nil {
+		log.Printf("connection from %s, but nothing is listening on %s: %v", remote, c.local, err)
 		if c.proto == "http" {
-			httpError(data, 502, "warren: the local service at "+c.local+" is not running")
+			rawHTTPError(data, 502, "warren: the local service at "+c.local+" is not running")
 		} else {
 			data.Close()
 		}
 		return
 	}
-	log.Printf("connection from %s", remote)
+	if logConn {
+		log.Printf("connection from %s", remote)
+	}
 	if c.proxyProto {
 		local.Write([]byte(proxyHeader(remote, local.RemoteAddr().String())))
 	}

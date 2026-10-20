@@ -16,8 +16,12 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/netip"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,8 +87,19 @@ type ServerConfig struct {
 	PublicHTTPPort int    `json:"public_http_port,omitempty"`
 	HTTPSCert      string `json:"https_cert,omitempty"` // must cover *.domain
 	HTTPSKey       string `json:"https_key,omitempty"`
-	PortMin        int    `json:"port_min"`
-	PortMax        int    `json:"port_max"`
+	// Send plain-HTTP website visitors to the HTTPS URL instead.
+	HTTPSRedirect bool `json:"https_redirect,omitempty"`
+	// Proxies in front of warren whose X-Forwarded-For/-Proto are believed.
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	// Get a certificate for each website tunnel automatically (certs.go).
+	ACME      bool   `json:"acme,omitempty"`
+	ACMEEmail string `json:"acme_email,omitempty"` // optional, for expiry notices
+	ACMEDir   string `json:"acme_dir,omitempty"`   // default: "acme" next to the config
+	ACMECA    string `json:"acme_ca,omitempty"`    // ACME directory URL; default Let's Encrypt
+	// Log every website request in the server log.
+	LogRequests bool `json:"log_requests,omitempty"`
+	PortMin     int  `json:"port_min"`
+	PortMax     int  `json:"port_max"`
 	// Visitors one tunnel may have connected at once (0 = 1000).
 	MaxConnsPerTunnel int          `json:"max_conns_per_tunnel,omitempty"`
 	Users             []UserConfig `json:"users"`
@@ -129,6 +144,12 @@ func loadServerConfig(path string) (*ServerConfig, error) {
 		}
 		u.TokenHash = h
 	}
+	if cfg.ACME && cfg.HTTPSAddr == "" {
+		return nil, fmt.Errorf("%s: \"acme\" needs https_addr (usually \":443\")", path)
+	}
+	if _, err := parsePrefixes(cfg.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("%s: trusted_proxies: %w", path, err)
+	}
 	return cfg, nil
 }
 
@@ -163,12 +184,17 @@ type Server struct {
 	httpOn  bool
 	limits  limits
 	hs      handshakes
+	proxy   *httputil.ReverseProxy
+	certs   *certSource // for https_addr, nil without it
+
+	trustedProxies []netip.Prefix
 
 	mu       sync.Mutex
 	users    []UserConfig
 	sessions map[*session]struct{}
 	claims   map[string]*session      // "tcp/25565", "udp/19132", "http/name"
 	pending  map[string]chan net.Conn // stream id -> waiting visitor
+	pools    map[string]*session      // pool id -> session
 }
 
 type session struct {
@@ -176,6 +202,14 @@ type session struct {
 	user      string
 	tokenHash string
 	ctrl      net.Conn
+	caps      []string   // negotiated with the client
+	idle      []net.Conn // pooled data connections, guarded by srv.mu
+
+	// website tunnels
+	auth      string // "user:password", or "" for none
+	allow     []netip.Prefix
+	transport *http.Transport
+	logs      chan Msg
 
 	wmu       sync.Mutex
 	closed    chan struct{}
@@ -226,7 +260,7 @@ func newServer(cfgPath string, cfg *ServerConfig) *Server {
 	if connsPerTunnel == 0 {
 		connsPerTunnel = defaultMaxConnsPerTunnel
 	}
-	return &Server{
+	srv := &Server{
 		cfgPath: cfgPath,
 		cfg:     cfg,
 		limits: limits{
@@ -239,11 +273,21 @@ func newServer(cfgPath string, cfg *ServerConfig) *Server {
 		sessions: map[*session]struct{}{},
 		claims:   map[string]*session{},
 		pending:  map[string]chan net.Conn{},
+		pools:    map[string]*session{},
 	}
+	srv.trustedProxies, _ = parsePrefixes(cfg.TrustedProxies) // checked by loadServerConfig
+	srv.proxy = newProxy(srv)
+	return srv
 }
 
 func (srv *Server) run() error {
 	cfg := srv.cfg
+	if cfg.HTTPSAddr != "" {
+		var err error
+		if srv.certs, err = newCertSource(srv); err != nil {
+			return err
+		}
+	}
 	ln, err := listen(cfg.Listen, cfg.TLSCert, cfg.TLSKey)
 	if err != nil {
 		return err
@@ -261,16 +305,16 @@ func (srv *Server) run() error {
 		}
 		srv.httpOn = true
 		log.Printf("http tunnels on %s", cfg.HTTPAddr)
-		go srv.serveHTTP(hl)
+		go srv.serveHTTP(hl, nil)
 	}
 	if cfg.HTTPSAddr != "" {
-		hl, err := listen(cfg.HTTPSAddr, cfg.HTTPSCert, cfg.HTTPSKey)
+		hl, err := net.Listen("tcp", cfg.HTTPSAddr)
 		if err != nil {
 			return err
 		}
 		srv.httpOn = true
-		log.Printf("https tunnels on %s", cfg.HTTPSAddr)
-		go srv.serveHTTP(hl)
+		log.Printf("https tunnels on %s (automatic certificates: %v)", cfg.HTTPSAddr, cfg.ACME)
+		go srv.serveHTTP(hl, srv.certs.tlsConfig())
 	}
 	go srv.watchUsers()
 
@@ -356,6 +400,8 @@ func (srv *Server) handleConn(c net.Conn) {
 		if ch == nil {
 			c.Close()
 		}
+	case "idle":
+		srv.addIdle(m.ID, c)
 	case "hello":
 		srv.handleSession(c, m)
 	default:
@@ -424,8 +470,12 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 		s.send(Msg{Type: "error", Error: msg, Fatal: fatal})
 	}
 
-	if hello.Version != protoVersion {
-		fail(true, "protocol version mismatch (server %d, client %d): update warren", protoVersion, hello.Version)
+	if hello.Version > protoVersion {
+		fail(true, "this server runs an older warren (protocol %d, client %d): ask the server admin to run \"warren update\"", protoVersion, hello.Version)
+		return
+	}
+	if hello.Version < protoVersion {
+		fail(true, "your warren is too old for this server (protocol %d, server %d): run \"warren update\"", hello.Version, protoVersion)
 		return
 	}
 	user := srv.authenticate(hello.Token)
@@ -434,6 +484,7 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 		return
 	}
 	s.user, s.tokenHash = user.Name, user.tokenHash()
+	s.caps = negotiateCaps(hello.Caps)
 
 	// Claim first: a reconnecting client asks for its old port/subdomain,
 	// which kicks its own stale session, so that one isn't counted below.
@@ -466,10 +517,18 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 		srv.mu.Unlock()
 	}()
 
+	ok.Caps = s.caps
+	if s.has("pool") {
+		ok.ID = s.openPool()
+		defer s.closePool(ok.ID)
+	}
 	if err := s.send(ok); err != nil {
 		return
 	}
-	log.Printf("[%s] opened %s (from %s)", s.user, ok.URL, c.RemoteAddr())
+	log.Printf("[%s] opened %s (from %s, caps %s)", s.user, ok.URL, c.RemoteAddr(), capsString(s.caps))
+	if hello.Proto == "http" {
+		go srv.warmCert(s, ok.Subdomain)
+	}
 
 	go s.pinger()
 	br := bufio.NewReader(c)
@@ -507,6 +566,21 @@ func (srv *Server) setupTunnel(s *session, hello Msg) (Msg, func(), error) {
 		if !srv.httpOn {
 			return Msg{}, nil, errors.New("http tunnels are not enabled on this server")
 		}
+		if hello.Auth != "" && !strings.Contains(hello.Auth, ":") {
+			return Msg{}, nil, errors.New("auth must be user:password")
+		}
+		allow, err := parsePrefixes(hello.Allow)
+		if err != nil {
+			return Msg{}, nil, err
+		}
+		// Everything a visitor's request needs is set before the claim
+		// makes the tunnel reachable.
+		s.auth, s.allow = hello.Auth, allow
+		s.transport = s.newTransport()
+		if s.has("http-log") {
+			s.logs = make(chan Msg, 64)
+			go s.sendLogs()
+		}
 		sub := strings.ToLower(hello.Subdomain)
 		if sub == "" {
 			for {
@@ -523,7 +597,10 @@ func (srv *Server) setupTunnel(s *session, hello Msg) (Msg, func(), error) {
 				return Msg{}, nil, err
 			}
 		}
-		cleanup := func() { srv.release("http/"+sub, s) }
+		cleanup := func() {
+			srv.release("http/"+sub, s)
+			s.transport.CloseIdleConnections()
+		}
 		return Msg{Type: "ok", URL: srv.httpURL(sub), Subdomain: sub}, cleanup, nil
 	}
 	return Msg{}, nil, fmt.Errorf("unknown tunnel type %q", hello.Proto)
@@ -659,6 +736,8 @@ func (srv *Server) serveTCP(ln net.Listener, s *session) {
 	}
 }
 
+func (s *session) has(c string) bool { return slices.Contains(s.caps, c) }
+
 func (s *session) send(m Msg) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
@@ -702,6 +781,9 @@ func (s *session) pinger() {
 // openStream asks the client to open a data connection for a new visitor
 // and waits for it to arrive.
 func (s *session) openStream(remote string) (net.Conn, error) {
+	if c := s.takeIdle(remote); c != nil {
+		return c, nil
+	}
 	srv := s.srv
 	if s.pending.Add(1) > int32(srv.limits.pendingStreams) {
 		s.pending.Add(-1)

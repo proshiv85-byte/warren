@@ -17,7 +17,7 @@ Client:
                                    save server address and token
   warren tcp  LOCAL [--port N]     expose a TCP service (e.g. Minecraft Java)
   warren udp  LOCAL [--port N]     expose a UDP service (e.g. Minecraft Bedrock)
-  warren http LOCAL [--subdomain NAME]
+  warren http LOCAL [--subdomain NAME] [--auth USER:PASS] [--allow IPS]
                                    expose a website at NAME.yourdomain
 
   LOCAL is a port (25565) or host:port (192.168.1.5:25565).
