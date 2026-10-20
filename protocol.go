@@ -30,7 +30,7 @@ import (
 //     every request a website tunnel served.
 //
 //   Data connection (one per visitor):
-//     client -> {"type":"join","id":..}
+//     client -> {"type":"join","id":..}  (or "idle" ahead of time, see pool.go)
 //     after that the connection carries raw visitor bytes. For UDP tunnels it
 //     carries datagrams framed as a 2-byte big-endian length + payload. For
 //     website tunnels it carries HTTP/1.1 requests from the server's proxy;
@@ -53,6 +53,7 @@ var supportedCaps = []string{
 	"http-allow", // hello may set "allow"
 	"http-log",   // the server sends "req" messages
 	"http-reuse", // website streams are kept alive and reused
+	"pool",       // the client keeps idle data connections open (pool.go)
 }
 
 // negotiateCaps returns the capabilities in offered that we support too.

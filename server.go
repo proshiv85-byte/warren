@@ -185,6 +185,7 @@ type Server struct {
 	sessions map[*session]struct{}
 	claims   map[string]*session      // "tcp/25565", "udp/19132", "http/name"
 	pending  map[string]chan net.Conn // stream id -> waiting visitor
+	pools    map[string]*session      // pool id -> session
 }
 
 type session struct {
@@ -192,7 +193,8 @@ type session struct {
 	user      string
 	tokenHash string
 	ctrl      net.Conn
-	caps      []string // negotiated with the client
+	caps      []string   // negotiated with the client
+	idle      []net.Conn // pooled data connections, guarded by srv.mu
 
 	// website tunnels
 	auth      string // "user:password", or "" for none
@@ -262,6 +264,7 @@ func newServer(cfgPath string, cfg *ServerConfig) *Server {
 		sessions: map[*session]struct{}{},
 		claims:   map[string]*session{},
 		pending:  map[string]chan net.Conn{},
+		pools:    map[string]*session{},
 	}
 	srv.trustedProxies, _ = parsePrefixes(cfg.TrustedProxies) // checked by loadServerConfig
 	srv.proxy = newProxy(srv)
@@ -386,6 +389,8 @@ func (srv *Server) handleConn(c net.Conn) {
 		if ch == nil {
 			c.Close()
 		}
+	case "idle":
+		srv.addIdle(m.ID, c)
 	case "hello":
 		srv.handleSession(c, m)
 	default:
@@ -502,6 +507,10 @@ func (srv *Server) handleSession(c net.Conn, hello Msg) {
 	}()
 
 	ok.Caps = s.caps
+	if s.has("pool") {
+		ok.ID = s.openPool()
+		defer s.closePool(ok.ID)
+	}
 	if err := s.send(ok); err != nil {
 		return
 	}
@@ -758,6 +767,9 @@ func (s *session) pinger() {
 // openStream asks the client to open a data connection for a new visitor
 // and waits for it to arrive.
 func (s *session) openStream(remote string) (net.Conn, error) {
+	if c := s.takeIdle(remote); c != nil {
+		return c, nil
+	}
 	srv := s.srv
 	if s.pending.Add(1) > int32(srv.limits.pendingStreams) {
 		s.pending.Add(-1)

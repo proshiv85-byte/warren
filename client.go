@@ -324,6 +324,12 @@ func (c *client) session() error {
 	} else {
 		log.Printf("reconnected: %s", m.URL)
 	}
+	logConn := !c.has("http-log")
+	if c.has("pool") && m.ID != "" {
+		done := make(chan struct{})
+		defer close(done)
+		c.keepPool(m.ID, done, logConn)
+	}
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(controlTimeout))
@@ -338,7 +344,7 @@ func (c *client) session() error {
 				return err
 			}
 		case "conn":
-			go c.handleStream(m.ID, m.Remote, !c.has("http-log"))
+			go c.handleStream(m.ID, m.Remote, logConn)
 		case "req":
 			if r := m.Req; r != nil {
 				log.Printf("%-7s %3d %6dms  %-15s %s", r.Method, r.Status, r.Ms, r.Remote, r.Path)
@@ -367,39 +373,33 @@ func (c *client) offerCaps() []string {
 
 func (c *client) has(cp string) bool { return slices.Contains(c.caps, cp) }
 
-// handleStream connects a visitor; logConn says whether to log it (website
-// tunnels with "http-log" log each request instead).
+// handleStream opens a data connection for a visitor the server announced.
 func (c *client) handleStream(id, remote string, logConn bool) {
-	var local net.Conn
-	var localErr error
-	if c.proto != "udp" {
-		local, localErr = net.DialTimeout("tcp", c.local, 5*time.Second)
-	}
-
 	data, err := c.dial()
 	if err != nil {
 		log.Printf("opening stream: %v", err)
-		if local != nil {
-			local.Close()
-		}
 		return
 	}
 	data.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := writeMsg(data, Msg{Type: "join", ID: id}); err != nil {
 		data.Close()
-		if local != nil {
-			local.Close()
-		}
 		return
 	}
 	data.SetWriteDeadline(time.Time{})
+	c.serveStream(data, remote, logConn)
+}
 
+// serveStream connects a visitor's data connection to the local service.
+// logConn says whether to log it (website tunnels with "http-log" log each
+// request instead).
+func (c *client) serveStream(data net.Conn, remote string, logConn bool) {
 	if c.proto == "udp" {
 		clientUDP(data, c.local, remote)
 		return
 	}
-	if localErr != nil {
-		log.Printf("connection from %s, but nothing is listening on %s: %v", remote, c.local, localErr)
+	local, err := net.DialTimeout("tcp", c.local, 5*time.Second)
+	if err != nil {
+		log.Printf("connection from %s, but nothing is listening on %s: %v", remote, c.local, err)
 		if c.proto == "http" {
 			rawHTTPError(data, 502, "warren: the local service at "+c.local+" is not running")
 		} else {

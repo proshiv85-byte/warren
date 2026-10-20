@@ -515,3 +515,75 @@ func writeTestCert(t *testing.T, certFile, keyFile string) {
 	os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
 	os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb}), 0o600)
 }
+
+// ---- idle connection pool ----
+
+func idleCount(srv *Server) int {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	n := 0
+	for s := range srv.sessions {
+		n += len(s.idle)
+	}
+	return n
+}
+
+func TestPool(t *testing.T) {
+	srv, ctrl, _ := startServerSrv(t, nil)
+	port := freePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	runClient(t, &client{server: ctrl, proto: "tcp", local: echoTCP(t), port: port})
+	waitFor(t, func() bool { return idleCount(srv) == poolSize })
+
+	echoOnce(t, addr, "pooled")
+	waitFor(t, func() bool { return idleCount(srv) == poolSize }) // refilled
+
+	// More visitors at once than the pool holds: the rest use "conn"/"join".
+	var wg sync.WaitGroup
+	for i := 0; i < 3*poolSize; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); echoOnce(t, addr, fmt.Sprint("burst ", i)) }()
+	}
+	wg.Wait()
+}
+
+func TestPoolDeadConnection(t *testing.T) {
+	srv, ctrl, _ := startServerSrv(t, nil)
+	port := freePort(t)
+	runClient(t, &client{server: ctrl, proto: "tcp", local: echoTCP(t), port: port})
+	waitFor(t, func() bool { return idleCount(srv) == poolSize })
+
+	// Slip connections that will never ack in front of the real ones.
+	srv.mu.Lock()
+	var s *session
+	for s = range srv.sessions {
+	}
+	for i := 0; i < 2; i++ {
+		a, b := net.Pipe()
+		b.Close()
+		s.idle = append(s.idle, a)
+	}
+	srv.mu.Unlock()
+
+	echoOnce(t, fmt.Sprintf("127.0.0.1:%d", port), "still works")
+}
+
+func TestPoolNotOffered(t *testing.T) {
+	withCaps(t, "http-log")
+	srv, ctrl, _ := startServerSrv(t, nil)
+	port := freePort(t)
+	runClient(t, &client{server: ctrl, proto: "tcp", local: echoTCP(t), port: port})
+	waitFor(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return len(srv.claims) == 1
+	})
+	echoOnce(t, fmt.Sprintf("127.0.0.1:%d", port), "no pool")
+	if n := idleCount(srv); n != 0 {
+		t.Errorf("%d idle connections without the pool capability", n)
+	}
+	m := rawHello(t, ctrl, Msg{Type: "hello", Version: protoVersion, Token: testToken, Proto: "tcp"})
+	if m.ID != "" {
+		t.Errorf("pool id handed out without the capability: %+v", m)
+	}
+}
