@@ -1,6 +1,6 @@
 # Builds everything and creates a DRAFT release on GitHub.
 #
-# To release: bump `version` in main.go (and mod_version in
+# To release: bump `version` in cmd/warren/main.go (and mod_version in
 # minecraft/gradle.properties if the mod changed), write
 # .github/release-notes/vX.Y.Z.md, merge to main, then on GitHub go to
 # Actions -> Release -> Run workflow. Check the draft on the Releases page
@@ -30,13 +30,13 @@ jobs:
             echo "::error::Run this from the main branch (you picked $GITHUB_REF_NAME)."
             exit 1
           fi
-          version=$(sed -n 's/^var version = "\(.*\)"$/\1/p' main.go)
+          version=$(sed -n 's/^var version = "\(.*\)"$/\1/p' cmd/warren/main.go)
           if [ -z "$version" ]; then
-            echo "::error::Could not find 'var version = \"...\"' in main.go."
+            echo "::error::Could not find 'var version = \"...\"' in cmd/warren/main.go."
             exit 1
           fi
           if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            echo "::error::v$version is already released. Raise the version in main.go first."
+            echo "::error::v$version is already released. Raise the version in cmd/warren/main.go first."
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
