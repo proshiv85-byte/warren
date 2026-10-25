@@ -113,7 +113,7 @@ folder on the VPS. Use the user you normally SSH in as: on Ubuntu VPSes
 that's usually `ubuntu`, on Debian often `debian`, sometimes `root`.
 
 ```sh
-scp dist/warren-linux-amd64 warren.service ubuntu@203.0.113.10:~/
+scp dist/warren-linux-amd64 deploy/warren.service ubuntu@203.0.113.10:~/
 ```
 
 > You can't `scp` straight into `/usr/local/bin` unless you log in as root.

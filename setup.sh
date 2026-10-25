@@ -188,7 +188,7 @@ remote_setup() {
 	trap 'rm -rf "$REMOTE_TMP"' EXIT
 	info "Building warren for linux/$goarch"
 	(cd "$SCRIPT_DIR" && CGO_ENABLED=0 GOOS=linux GOARCH=$goarch \
-		go build -trimpath -ldflags "-s -w" -o "$tmp/warren" .)
+		go build -trimpath -ldflags "-s -w" -o "$tmp/warren" ./cmd/warren)
 	cp "${BASH_SOURCE[0]}" "$tmp/setup.sh"
 
 	info "Copying to $target:~/warren-setup/"
@@ -265,7 +265,7 @@ find_binary() {
 	if [[ -z ${NEW_BIN:-} && -f $SCRIPT_DIR/go.mod ]] && have go; then
 		info "Building warren with Go"
 		NEW_BIN=$(mktemp)
-		(cd "$SCRIPT_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$NEW_BIN" .)
+		(cd "$SCRIPT_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$NEW_BIN" ./cmd/warren)
 	fi
 
 	if [[ -z ${NEW_BIN:-} ]]; then
