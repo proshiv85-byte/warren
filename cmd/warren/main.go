@@ -8,7 +8,7 @@ import (
 )
 
 // version is a var so builds can override it: -ldflags "-X main.version=..."
-var version = "0.5.0"
+var version = "0.6.0"
 
 const usageText = `warren - self-hosted tunnels (TCP, UDP, HTTP)
 
